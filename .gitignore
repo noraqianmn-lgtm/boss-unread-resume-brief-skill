@@ -1,0 +1,7 @@
+config.json
+*.local.json
+node_modules/
+tmp/
+out/
+*.log
+
