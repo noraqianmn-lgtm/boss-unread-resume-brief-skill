@@ -1,0 +1,82 @@
+# BOSS Unread Resume Brief Skill
+
+This repository packages a Codex/WorkBuddy skill for safe BOSS Zhipin recruiting briefs.
+
+It helps an AI agent:
+
+- open or reuse the BOSS recruiting login flow;
+- work on the position and unread-greetings list that the recruiter has selected;
+- safely read each candidate's "online resume" without sending messages or changing candidate status;
+- clarify A/B/C screening criteria before evaluation;
+- generate a Feishu daily recruiting document and optional Bitable records;
+- send the final report link through a Feishu bot.
+
+## Safety Boundary
+
+The skill is read-only by default on BOSS. It must not click "not suitable", send messages, request resumes, greet candidates, or change candidate status unless the recruiter explicitly confirms the exact action list in a later step.
+
+## Installation
+
+In Codex, ask:
+
+```text
+Use $skill-installer to install https://github.com/<your-github-user>/<repo-name>/tree/main/skills/boss-unread-resume-brief
+```
+
+Or run the installer script directly:
+
+```powershell
+python C:\Users\<you>\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py --url https://github.com/<your-github-user>/<repo-name>/tree/main/skills/boss-unread-resume-brief
+```
+
+Restart Codex or WorkBuddy after installation so the new skill is discovered.
+
+## First-Time Setup
+
+Install command-line dependencies:
+
+```powershell
+npm install -g @joohw/boss-cli
+npm install -g @larksuite/cli
+```
+
+If PowerShell blocks npm scripts, run:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Then authenticate:
+
+```powershell
+boss login
+lark-cli auth login --as user
+```
+
+Copy `config.example.json` to `config.json` inside the installed skill folder and fill in Feishu folder/base/table/bot settings.
+
+## Typical Prompt
+
+```text
+Use $boss-unread-resume-brief.
+Position: R&D Director La Forge
+Only read unread greetings. I have already opened BOSS recruiting chat on this position's unread list.
+Here are the rough job requirements: ...
+Please first help me clarify A/B/C screening criteria, then read online resumes and generate a Feishu daily brief. Do not take any BOSS disposition actions.
+```
+
+## Repository Layout
+
+```text
+skills/boss-unread-resume-brief/
+  SKILL.md
+  agents/openai.yaml
+  config.example.json
+  scripts/
+    read-current-chat-online-resumes.js
+    send-feishu-msg.js
+  references/
+    screening-criteria.md
+    feishu-output.md
+```
+
