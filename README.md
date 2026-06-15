@@ -15,6 +15,17 @@ It helps an AI agent:
 
 The skill is read-only by default on BOSS. It must not click "not suitable", send messages, request resumes, greet candidates, or change candidate status unless the recruiter explicitly confirms the exact action list in a later step.
 
+## Per-User Accounts And Tokens
+
+Each intern must use their own local BOSS and Feishu authentication.
+
+- Do not share BOSS cookies, browser profiles, QR-code sessions, or recruiter account sessions.
+- Do not commit or share `config.json`; only `config.example.json` belongs in GitHub.
+- Each user runs `boss login` on their own computer and logs into the BOSS recruiter account they are allowed to use.
+- Each user runs `lark-cli auth login --as user` on their own computer, producing their own Feishu token.
+- Each user fills their own local `config.json` with the Feishu folder, Bitable, bot, and user settings they are allowed to write to.
+- If several interns should write into the same recruiting Feishu folder or Bitable, grant them Feishu permissions to that resource; do not copy another person's token.
+
 ## Installation
 
 In Codex, ask:
@@ -53,7 +64,7 @@ boss login
 lark-cli auth login --as user
 ```
 
-Copy `config.example.json` to `config.json` inside the installed skill folder and fill in Feishu folder/base/table/bot settings.
+These commands must be run by each intern on their own machine. Copy `config.example.json` to `config.json` inside the installed skill folder and fill in that user's Feishu folder/base/table/bot settings. Keep `config.json` local and private.
 
 ## Typical Prompt
 
@@ -79,4 +90,3 @@ skills/boss-unread-resume-brief/
     screening-criteria.md
     feishu-output.md
 ```
-
