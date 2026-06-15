@@ -1,0 +1,18 @@
+{
+  "feishu": {
+    "folder_token": "",
+    "base_token": "",
+    "table_id": "",
+    "bot_app_id": "",
+    "user_open_id": ""
+  },
+  "boss": {
+    "browser_url": "http://127.0.0.1:53470"
+  },
+  "reporting": {
+    "default_folder_name": "BOSS recruiting daily briefs",
+    "write_bitable": true,
+    "send_bot_message": true
+  }
+}
+
