@@ -14,6 +14,8 @@ Use this skill to produce a read-only recruiting brief from BOSS Zhipin unread g
 - If the user later asks for a disposition action, ask for explicit confirmation of the exact candidate list before acting.
 - If BOSS triggers risk verification, stop and ask the user to complete it. Continue only after the user says they are back on the correct page.
 - Prefer reading the selected current list instead of navigating BOSS pages. Ask the user to place the page on the target position and unread-greetings list.
+- Require per-user authentication. Never ask users to share BOSS cookies, browser profiles, QR-code sessions, Feishu tokens, or another user's `config.json`.
+- Treat `config.json` as a local secret file. The repository should contain `config.example.json` only.
 
 ## First-Time Setup
 
@@ -24,9 +26,9 @@ When the user says `boss init`, `setup`, or asks how to install:
    - `npm install -g @joohw/boss-cli`
    - `npm install -g @larksuite/cli`
 3. If PowerShell blocks npm scripts, tell the user to run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
-4. Run or ask the user to run `boss login` so BOSS opens a browser login.
-5. Run `lark-cli auth login --as user` if Feishu is not authenticated.
-6. Copy `config.example.json` to `config.json` and fill Feishu settings.
+4. Ask this user to run `boss login` on their own machine and log into the BOSS recruiter account they are allowed to use.
+5. Ask this user to run `lark-cli auth login --as user` on their own machine if Feishu is not authenticated.
+6. Copy `config.example.json` to local `config.json` and fill this user's Feishu folder/base/table/bot settings. If multiple interns write to one shared Feishu folder or Bitable, they must be granted Feishu permission to the resource; do not copy another user's token or config.
 
 ## Daily Workflow
 
@@ -38,7 +40,7 @@ When the user says `boss init`, `setup`, or asks how to install:
    - C: clear mismatch, insufficient seniority, or missing must-have evidence.
    Read `references/screening-criteria.md` when criteria need structuring.
 4. Show the criteria back to the user and ask whether to proceed. If the user says "沿用", use the last confirmed criteria in the thread.
-5. Ask the user to open BOSS recruiting chat, choose the target position, and show the unread-greetings list. If login is needed, run `boss login` or ask the user to complete browser login.
+5. Ask the user to open BOSS recruiting chat with their own logged-in recruiter session, choose the target position, and show the unread-greetings list. If login is needed, run `boss login` or ask the user to complete browser login on their own account.
 6. Read online resumes with:
 
 ```powershell
@@ -86,4 +88,3 @@ Final user response must include:
 - top A candidates;
 - BOSS-side action count, normally `0`;
 - any manual follow-up needed.
-
