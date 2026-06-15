@@ -1,0 +1,8 @@
+interface:
+  display_name: "BOSS 未读招呼简报"
+  short_description: "安全读取在线简历并生成飞书招聘日报"
+  default_prompt: "Use $boss-unread-resume-brief to read unread BOSS greetings for one position, clarify ABC screening criteria, and generate a Feishu recruiting brief."
+
+policy:
+  allow_implicit_invocation: true
+
