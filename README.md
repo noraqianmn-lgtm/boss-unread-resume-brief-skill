@@ -66,6 +66,22 @@ lark-cli auth login --as user
 
 These commands must be run by each intern on their own machine. Copy `config.example.json` to `config.json` inside the installed skill folder and fill in that user's Feishu folder/base/table/bot settings. Keep `config.json` local and private.
 
+## BOSS Page Keeps Refreshing
+
+If BOSS keeps refreshing or the script says it cannot find the "online resume" button:
+
+1. Stop the running script.
+2. Close the BOSS browser opened by `boss login`.
+3. Run `boss login` again and finish login/risk verification.
+4. In BOSS, manually switch to the target position and the unread-greetings list.
+5. Ask the agent to rerun a small test batch first:
+
+```powershell
+node <installed-skill-path>\scripts\read-current-chat-online-resumes.js --position "<position name>" --limit 3 --out test_online_resumes.json
+```
+
+Do not downgrade to chat-summary-only reporting unless the recruiter explicitly accepts that online resumes could not be read.
+
 ## Typical Prompt
 
 ```text
