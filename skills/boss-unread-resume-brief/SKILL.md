@@ -76,6 +76,8 @@ The BOSS online resume can be rendered through an iframe and canvas/wasm. The bu
 
 If the page keeps jumping, do not keep clicking manually. Ask the user to close the browser, run `boss login`, return to the target position unread list, then rerun the script with a small `--limit 3` test.
 
+If rows are scanned but every candidate reports `online resume button not found`, do not immediately generate a chat-summary-only report. This usually means the candidate row was not selected and the right-side detail panel did not load. Ask the user to refresh/reopen BOSS, return to the target position unread list, update/reinstall this skill if needed, and rerun a `--limit 3` test. Only use chat summaries as the final basis if the recruiter explicitly accepts that online resumes could not be read.
+
 ## Output Contract
 
 Final user response must include:
