@@ -31,13 +31,13 @@ Each intern must use their own local BOSS and Feishu authentication.
 In Codex, ask:
 
 ```text
-Use $skill-installer to install https://github.com/<your-github-user>/<repo-name>/tree/main/skills/boss-unread-resume-brief
+Use $skill-installer to install https://github.com/noraqianmn-lgtm/boss-unread-resume-brief-skill/tree/main/skills/boss-unread-resume-brief
 ```
 
 Or run the installer script directly:
 
 ```powershell
-python C:\Users\<you>\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py --url https://github.com/<your-github-user>/<repo-name>/tree/main/skills/boss-unread-resume-brief
+python C:\Users\<you>\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py --url https://github.com/noraqianmn-lgtm/boss-unread-resume-brief-skill/tree/main/skills/boss-unread-resume-brief
 ```
 
 Restart Codex or WorkBuddy after installation so the new skill is discovered.
