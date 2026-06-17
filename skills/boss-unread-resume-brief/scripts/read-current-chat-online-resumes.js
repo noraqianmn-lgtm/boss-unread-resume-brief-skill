@@ -103,8 +103,10 @@ async function stabilizeChatPage(page) {
       };
 
       try {
+        const reload = window.location.reload.bind(window.location);
         const assign = window.location.assign.bind(window.location);
         const replace = window.location.replace.bind(window.location);
+        window.__bossBriefOriginalReload = reload;
         window.location.assign = (url) => {
           if (shouldBlockBossNavigation(url)) return undefined;
           return assign(url);
@@ -113,6 +115,7 @@ async function stabilizeChatPage(page) {
           if (shouldBlockBossNavigation(url)) return undefined;
           return replace(url);
         };
+        window.location.reload = () => undefined;
       } catch (_) {}
 
       try {
@@ -129,12 +132,21 @@ async function stabilizeChatPage(page) {
           return originalAddEventListener(type, listener, options);
         };
       } catch (_) {}
+
+      try {
+        const originalWindowAddEventListener = window.addEventListener.bind(window);
+        window.addEventListener = function patchedWindowAddEventListener(type, listener, options) {
+          if ((type === "blur" || type === "pagehide") && window.top === window) return undefined;
+          return originalWindowAddEventListener(type, listener, options);
+        };
+      } catch (_) {}
     });
   };
 
   await page.evaluateOnNewDocument(() => {
     if (window.top !== window) return;
     try {
+      window.location.reload = () => undefined;
       Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
       Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
       Object.defineProperty(document, "webkitHidden", { configurable: true, get: () => false });
@@ -152,6 +164,12 @@ async function stabilizeChatPage(page) {
 
   try {
     await install();
+  } catch (_) {}
+
+  try {
+    const client = await page.target().createCDPSession();
+    await client.send("Emulation.setFocusEmulationEnabled", { enabled: true });
+    await client.detach();
   } catch (_) {}
 }
 
@@ -276,14 +294,38 @@ async function clickRow(page, target, position) {
           });
         if (!row) return { ok: false };
         row.scrollIntoView({ block: "center" });
-        for (const type of ["pointerdown", "mousedown", "mouseup", "click"]) {
-          row.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+        const clickTarget =
+          row.querySelector(".geek-name") ||
+          row.querySelector(".content") ||
+          row.querySelector(".info-primary") ||
+          row;
+        for (const type of ["pointerover", "mouseover", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+          clickTarget.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
         }
-        return { ok: true, text: normalize(row.innerText || row.textContent || "") };
+        if (typeof clickTarget.click === "function") clickTarget.click();
+        const r = row.getBoundingClientRect();
+        return {
+          ok: true,
+          text: normalize(row.innerText || row.textContent || ""),
+          rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+        };
       },
       { targetName: target.name, targetText: target.text, positionText: position }
     );
-    if (clicked && clicked.ok) return clicked;
+    if (clicked && clicked.ok) {
+      if (clicked.rect && clicked.rect.width > 0 && clicked.rect.height > 0) {
+        const x = Math.max(clicked.rect.left + 24, clicked.rect.left + Math.min(clicked.rect.width * 0.35, 180));
+        const y = clicked.rect.top + clicked.rect.height / 2;
+        try {
+          await page.mouse.move(x, y);
+          await page.mouse.down();
+          await sleep(80);
+          await page.mouse.up();
+        } catch (_) {}
+      }
+      const panel = await waitForCandidatePanel(page, target.name);
+      return { ...clicked, panelReady: panel.ready, panelText: panel.text, panelReason: panel.reason };
+    }
 
     const moved = await safePageEval(page, () => {
       const list =
@@ -301,19 +343,61 @@ async function clickRow(page, target, position) {
   return { ok: false, reason: "candidate row not found after scrolling" };
 }
 
+async function waitForCandidatePanel(page, expectedName) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const state = await safePageEval(page, (name) => {
+      const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
+      const detailRoots = [
+        ".chat-conversation",
+        ".conversation-main",
+        ".chat-panel",
+        ".base-info-single-container",
+        ".dialog-container",
+        ".boss-chat",
+      ];
+      const root =
+        detailRoots.map((selector) => document.querySelector(selector)).find(Boolean) || document.body;
+      const text = normalize(root.innerText || root.textContent || "");
+      const hasOnlineResume = [...document.querySelectorAll("a,button,span,div")]
+        .some((el) => {
+          const content = String(el.innerText || el.textContent || "");
+          const cls = String(el.className || "");
+          return content.includes("在线简历") || cls.includes("resume-btn-online");
+        });
+      const activeText = normalize(
+        document.querySelector(".geek-item-wrap.active,.geek-item.active,.geek-item-wrap.selected,.geek-item.selected")
+          ?.innerText || ""
+      );
+      return {
+        ready: text.includes(name) || activeText.includes(name) || hasOnlineResume,
+        text: text.slice(0, 3000),
+        hasOnlineResume,
+        activeText,
+      };
+    }, expectedName);
+
+    if (state && state.ready) return state;
+    await sleep(350);
+  }
+  return { ready: false, text: "", reason: "candidate detail panel did not load after click" };
+}
+
 async function openOnlineResume(page) {
   return safePageEval(page, () => {
-    const btn = [...document.querySelectorAll("a,button")]
+    const btn = [...document.querySelectorAll("a,button,span,div")]
       .find((el) => {
-        const text = String(el.innerText || el.textContent || "");
+        const text = String(el.innerText || el.textContent || "").replace(/\s+/g, "");
         const cls = String(el.className || "");
-        return text.includes("在线简历") || cls.includes("resume-btn-online");
+        const r = el.getBoundingClientRect();
+        const visible = r.width > 20 && r.height > 15 && r.top >= 0 && r.left >= 0;
+        return visible && (text.includes("在线简历") || cls.includes("resume-btn-online"));
       });
     if (!btn) return { ok: false, reason: "online resume button not found" };
     btn.scrollIntoView({ block: "center" });
-    for (const type of ["pointerdown", "mousedown", "mouseup", "click"]) {
+    for (const type of ["pointerover", "mouseover", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
       btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
     }
+    if (typeof btn.click === "function") btn.click();
     return { ok: true };
   });
 }
@@ -465,7 +549,7 @@ async function main() {
       fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
       continue;
     }
-    await sleep(1200);
+    await sleep(clicked.panelReady ? 700 : 1600);
 
     const headerText = await safePageEval(page, () => {
       const box =
@@ -481,6 +565,9 @@ async function main() {
         name: row.name,
         row,
         clickedText: clicked.text,
+        panelReady: clicked.panelReady,
+        panelReason: clicked.panelReason,
+        panelText: clicked.panelText,
         headerText,
         error: opened ? opened.reason : "online resume button not found",
       });
@@ -516,4 +603,3 @@ main().catch((error) => {
   console.error(error && error.stack ? error.stack : String(error));
   process.exit(1);
 });
-
