@@ -36,6 +36,7 @@ function parseArgs(argv) {
     limit: 0,
     onlyUnread: false,
     scanOnly: false,
+    stabilize: false,
   };
 
   for (let i = 2; i < argv.length; i += 1) {
@@ -46,6 +47,7 @@ function parseArgs(argv) {
     else if (arg === "--limit") args.limit = Number(argv[++i] || "0");
     else if (arg === "--only-unread") args.onlyUnread = true;
     else if (arg === "--scan-only") args.scanOnly = true;
+    else if (arg === "--stabilize") args.stabilize = true;
     else if (arg === "--help" || arg === "-h") args.help = true;
   }
   return args;
@@ -63,7 +65,8 @@ Prerequisites:
   - The recruiter has selected the target position and unread-greetings list when unread-only work is required.
 
 Safety:
-  This script reads rows and online resumes only. It never sends messages or clicks disposition actions.`);
+  This script reads rows and online resumes only. It never sends messages or clicks disposition actions.
+  The page-stabilizing patch is OFF by default. Add --stabilize only as a last-resort fallback.`);
 }
 
 function sleep(ms) {
@@ -299,28 +302,25 @@ async function clickRow(page, target, position) {
           row.querySelector(".content") ||
           row.querySelector(".info-primary") ||
           row;
-        for (const type of ["pointerover", "mouseover", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-          clickTarget.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-        }
-        if (typeof clickTarget.click === "function") clickTarget.click();
-        const r = row.getBoundingClientRect();
+        const r = clickTarget.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
         return {
           ok: true,
           text: normalize(row.innerText || row.textContent || ""),
           rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+          rowRect: { left: rowRect.left, top: rowRect.top, width: rowRect.width, height: rowRect.height },
         };
       },
       { targetName: target.name, targetText: target.text, positionText: position }
     );
     if (clicked && clicked.ok) {
       if (clicked.rect && clicked.rect.width > 0 && clicked.rect.height > 0) {
-        const x = Math.max(clicked.rect.left + 24, clicked.rect.left + Math.min(clicked.rect.width * 0.35, 180));
+        const x = clicked.rect.left + Math.min(Math.max(clicked.rect.width / 2, 18), Math.max(clicked.rect.width - 8, 18));
         const y = clicked.rect.top + clicked.rect.height / 2;
         try {
           await page.mouse.move(x, y);
-          await page.mouse.down();
           await sleep(80);
-          await page.mouse.up();
+          await page.mouse.click(x, y, { delay: 120 });
         } catch (_) {}
       }
       const panel = await waitForCandidatePanel(page, target.name);
@@ -383,23 +383,83 @@ async function waitForCandidatePanel(page, expectedName) {
 }
 
 async function openOnlineResume(page) {
-  return safePageEval(page, () => {
-    const btn = [...document.querySelectorAll("a,button,span,div")]
-      .find((el) => {
-        const text = String(el.innerText || el.textContent || "").replace(/\s+/g, "");
-        const cls = String(el.className || "");
-        const r = el.getBoundingClientRect();
-        const visible = r.width > 20 && r.height > 15 && r.top >= 0 && r.left >= 0;
-        return visible && (text.includes("在线简历") || cls.includes("resume-btn-online"));
-      });
-    if (!btn) return { ok: false, reason: "online resume button not found" };
-    btn.scrollIntoView({ block: "center" });
-    for (const type of ["pointerover", "mouseover", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-      btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+  const selector = 'a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]';
+  const debugCandidates = [];
+
+  for (const frame of page.frames()) {
+    let handles = [];
+    try {
+      handles = await frame.$$(selector);
+    } catch (_) {
+      continue;
     }
-    if (typeof btn.click === "function") btn.click();
-    return { ok: true };
-  });
+
+    const scored = [];
+    for (const handle of handles) {
+      try {
+        const info = await handle.evaluate((el) => {
+          const text = String(el.innerText || el.textContent || "").replace(/\s+/g, "");
+          const cls = String(el.className || "");
+          const title = String(el.getAttribute("title") || "");
+          const aria = String(el.getAttribute("aria-label") || "");
+          const r = el.getBoundingClientRect();
+          const visible = r.width > 12 && r.height > 12 && r.bottom > 0 && r.right > 0;
+          const haystack = `${text} ${cls} ${title} ${aria}`.toLowerCase();
+          let score = 0;
+          if (text.includes("在线简历") || title.includes("在线简历") || aria.includes("在线简历")) score += 100;
+          if (text.includes("查看简历") || title.includes("查看简历") || aria.includes("查看简历")) score += 80;
+          if (cls.includes("resume-btn-online")) score += 90;
+          if (haystack.includes("online") && haystack.includes("resume")) score += 70;
+          if (haystack.includes("resume")) score += 30;
+          if (text.includes("简历") || title.includes("简历") || aria.includes("简历")) score += 25;
+          if (text.includes("附件简历") || title.includes("附件简历") || aria.includes("附件简历")) score -= 15;
+          return {
+            visible,
+            score,
+            text: text.slice(0, 80),
+            cls: cls.slice(0, 120),
+            title,
+            aria,
+            rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+          };
+        });
+        if (info.visible && info.score > 0) {
+          scored.push({ handle, info, frameUrl: frame.url() });
+          debugCandidates.push({ ...info, frameUrl: frame.url() });
+        } else {
+          await handle.dispose().catch(() => {});
+        }
+      } catch (_) {
+        await handle.dispose().catch(() => {});
+      }
+    }
+
+    scored.sort((a, b) => b.info.score - a.info.score);
+    const best = scored[0];
+    for (const item of scored.slice(1)) await item.handle.dispose().catch(() => {});
+    if (!best) continue;
+
+    try {
+      await best.handle.hover();
+      await sleep(120);
+      await best.handle.click({ delay: 120 });
+      await best.handle.dispose().catch(() => {});
+      return { ok: true, frameUrl: best.frameUrl, button: best.info };
+    } catch (error) {
+      await best.handle.dispose().catch(() => {});
+      return {
+        ok: false,
+        reason: `online resume candidate found but click failed: ${error.message || error}`,
+        candidates: debugCandidates.slice(0, 20),
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    reason: "online resume button not found",
+    candidates: debugCandidates.slice(0, 20),
+  };
 }
 
 async function readWasmResumeDetail(page, expectedName) {
@@ -505,7 +565,9 @@ async function main() {
   const puppeteer = requirePuppeteerCore();
   const browser = await puppeteer.connect({ browserURL: args.browserUrl, defaultViewport: null });
   const page = await findChatPage(browser);
-  await stabilizeChatPage(page);
+  if (args.stabilize) {
+    await stabilizeChatPage(page);
+  }
   await patchCanvasTextCapture(page);
   await page.bringToFront();
 
@@ -569,6 +631,7 @@ async function main() {
         panelReason: clicked.panelReason,
         panelText: clicked.panelText,
         headerText,
+        resumeButtonProbe: opened,
         error: opened ? opened.reason : "online resume button not found",
       });
       fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
