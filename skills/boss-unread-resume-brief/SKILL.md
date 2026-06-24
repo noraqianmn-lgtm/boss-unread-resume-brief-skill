@@ -67,8 +67,9 @@ Use `--browser-url http://127.0.0.1:<port>` if the default BOSS debug port is di
 The BOSS online resume can be rendered through an iframe and canvas/wasm. The bundled script:
 
 - connects to the existing BOSS recruiting browser through Chrome remote debugging;
-- stabilizes the chat page against refresh/visibility navigation side effects;
-- scans the current candidate list without navigating to recommendations;
+- leaves BOSS native page behavior intact by default; `--stabilize` is a last-resort fallback for refresh/visibility issues;
+- reads the current candidate list in single-pass mode: process visible rows immediately, then scroll to the next visible batch;
+- avoids the old two-pass "scan all rows, then find them again" pattern because BOSS uses virtual scrolling and previously scanned rows may no longer exist in the DOM;
 - opens each candidate's "在线简历";
 - captures structured resume detail where available;
 - captures canvas text where available;
