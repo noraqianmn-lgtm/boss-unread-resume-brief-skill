@@ -49,6 +49,8 @@ node <skill-dir>\scripts\read-current-chat-online-resumes.js --position "<positi
 
 Use `--browser-url http://127.0.0.1:<port>` if the default BOSS debug port is different. Use `--limit N` for a small test batch. Use `--only-unread` only if the BOSS row text exposes unread markers; otherwise rely on the user-selected unread list.
 
+Do not add `--bring-to-front` or `--reset-to-top` by default. `--bring-to-front` can trigger BOSS to route to `/web/chat/recommend`, and `--reset-to-top` can force the virtual list into a loading state with zero rendered rows. Use the browser exactly where the user placed it: target position plus unread-greetings list.
+
 7. Inspect the JSON. If any record has `error`, retry once. If it still fails, include it in the report as "online resume not read; needs manual check".
 8. Evaluate candidates using the confirmed criteria. Base judgments primarily on `detail`, `canvasText`, and `headerText` from the online resume output.
 9. Generate a Markdown report:
@@ -68,7 +70,8 @@ The BOSS online resume can be rendered through an iframe and canvas/wasm. The bu
 
 - connects to the existing BOSS recruiting browser through Chrome remote debugging;
 - leaves BOSS native page behavior intact by default; `--stabilize` is a last-resort fallback for refresh/visibility issues;
-- reads the current candidate list in single-pass mode: process visible rows immediately, then scroll to the next visible batch;
+- reads the current candidate list in single-pass mode from the currently visible rows: process visible rows immediately, then scroll to the next visible batch;
+- does not call `page.bringToFront()` or reset the list to top unless the user explicitly passes `--bring-to-front` or `--reset-to-top`;
 - avoids the old two-pass "scan all rows, then find them again" pattern because BOSS uses virtual scrolling and previously scanned rows may no longer exist in the DOM;
 - opens each candidate's "在线简历";
 - captures structured resume detail where available;
@@ -76,6 +79,8 @@ The BOSS online resume can be rendered through an iframe and canvas/wasm. The bu
 - writes incremental JSON after each candidate.
 
 If the page keeps jumping, do not keep clicking manually. Ask the user to close the browser, run `boss login`, return to the target position unread list, then rerun the script with a small `--limit 3` test. The script no longer patches BOSS page visibility/reload behavior by default. Add `--stabilize` only as a last-resort fallback if the page still refreshes because the browser loses focus.
+
+If the script reports that BOSS is on `/web/chat/recommend`, stop and ask the user to manually switch back to the target position's unread chat list. Do not try to navigate the SPA automatically.
 
 If rows are scanned but every candidate reports `online resume button not found`, do not immediately generate a chat-summary-only report. This usually means the candidate row was not selected and the right-side detail panel did not load. Ask the user to refresh/reopen BOSS, return to the target position unread list, update/reinstall this skill if needed, and rerun a `--limit 3` test. Only use chat summaries as the final basis if the recruiter explicitly accepts that online resumes could not be read.
 
