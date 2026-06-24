@@ -82,9 +82,13 @@ node <installed-skill-path>\scripts\read-current-chat-online-resumes.js --positi
 
 Only add `--stabilize` as a last-resort fallback when the page still refreshes because the browser loses focus. The default mode avoids patching BOSS page visibility/reload behavior so candidate-list rendering is less likely to break.
 
+Do not add `--bring-to-front` by default. On some BOSS sessions, bringing the page to front triggers the SPA route to jump to `/web/chat/recommend`.
+
+Do not add `--reset-to-top` by default. BOSS uses a virtual scrolling list; forcing the list back to the top can leave the DOM in a temporary loading state with zero candidate rows. Put the page on the target position's unread list manually, then let the script start from the currently visible rows.
+
 Do not downgrade to chat-summary-only reporting unless the recruiter explicitly accepts that online resumes could not be read.
 
-The reader works in single-pass mode by default: it processes each currently visible candidate row immediately, opens the online resume, writes the result, and then scrolls to the next visible batch. This avoids BOSS virtual-list failures where a row found during scanning cannot be found again later.
+The reader works in single-pass mode by default: it processes each currently visible candidate row immediately, opens the online resume, writes the result, and then scrolls to the next visible batch. It does not bring the page to front or reset the list position unless explicitly requested.
 
 ## Typical Prompt
 
