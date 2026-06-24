@@ -84,6 +84,8 @@ Only add `--stabilize` as a last-resort fallback when the page still refreshes b
 
 Do not downgrade to chat-summary-only reporting unless the recruiter explicitly accepts that online resumes could not be read.
 
+The reader works in single-pass mode by default: it processes each currently visible candidate row immediately, opens the online resume, writes the result, and then scrolls to the next visible batch. This avoids BOSS virtual-list failures where a row found during scanning cannot be found again later.
+
 ## Typical Prompt
 
 ```text
