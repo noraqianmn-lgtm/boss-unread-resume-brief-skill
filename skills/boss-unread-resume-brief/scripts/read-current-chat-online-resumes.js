@@ -37,6 +37,8 @@ function parseArgs(argv) {
     onlyUnread: false,
     scanOnly: false,
     stabilize: false,
+    resetToTop: false,
+    bringToFront: false,
   };
 
   for (let i = 2; i < argv.length; i += 1) {
@@ -48,6 +50,8 @@ function parseArgs(argv) {
     else if (arg === "--only-unread") args.onlyUnread = true;
     else if (arg === "--scan-only") args.scanOnly = true;
     else if (arg === "--stabilize") args.stabilize = true;
+    else if (arg === "--reset-to-top") args.resetToTop = true;
+    else if (arg === "--bring-to-front") args.bringToFront = true;
     else if (arg === "--help" || arg === "-h") args.help = true;
   }
   return args;
@@ -66,7 +70,8 @@ Prerequisites:
 
 Safety:
   This script reads rows and online resumes only. It never sends messages or clicks disposition actions.
-  The page-stabilizing patch is OFF by default. Add --stabilize only as a last-resort fallback.`);
+  The page-stabilizing patch is OFF by default. Add --stabilize only as a last-resort fallback.
+  The script does not bring BOSS to front or reset the list to top by default. Add --bring-to-front or --reset-to-top only when you explicitly want that behavior.`);
 }
 
 function sleep(ms) {
@@ -210,14 +215,8 @@ async function scanCurrentList(page, args) {
   const seen = new Map();
   let stagnant = 0;
 
-  await safePageEval(page, () => {
-    const list =
-      document.querySelector(".user-list.b-scroll-stable") ||
-      document.querySelector(".user-list") ||
-      document.scrollingElement;
-    if (list) list.scrollTop = 0;
-  });
-  await sleep(700);
+  if (args.resetToTop) await resetListToTop(page);
+  else await sleep(300);
 
   for (let step = 0; step < 120 && stagnant < 10; step += 1) {
     const rows = await safePageEval(
@@ -439,7 +438,8 @@ async function readCandidateFromVisibleRow(page, row) {
 async function readVisibleRowsSinglePass(page, args, output) {
   const seen = new Set();
   let stagnant = 0;
-  await resetListToTop(page);
+  if (args.resetToTop) await resetListToTop(page);
+  else await sleep(300);
 
   for (let step = 0; step < 120 && stagnant < 10; step += 1) {
     const visibleRows = (await getVisibleRows(page, args)) || [];
@@ -762,7 +762,9 @@ async function main() {
     await stabilizeChatPage(page);
   }
   await patchCanvasTextCapture(page);
-  await page.bringToFront();
+  if (args.bringToFront) {
+    await page.bringToFront();
+  }
 
   const pageInfo = await safePageEval(page, () => ({
     url: location.href,
@@ -770,6 +772,11 @@ async function main() {
     text: document.body.innerText.slice(0, 500),
   }));
   console.error(`connected: ${pageInfo.url}`);
+  if (pageInfo.url.includes("/web/chat/recommend")) {
+    throw new Error(
+      "BOSS is on /web/chat/recommend. Manually switch the browser back to the target position's unread chat list, then rerun without --bring-to-front."
+    );
+  }
 
   const output = {
     meta: {
