@@ -272,6 +272,199 @@ async function scanCurrentList(page, args) {
   return rows;
 }
 
+async function getVisibleRows(page, args) {
+  return safePageEval(
+    page,
+    ({ position, onlyUnread }) => {
+      const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
+      return [...document.querySelectorAll(".geek-item-wrap,.geek-item")]
+        .map((row, index) => {
+          const text = normalize(row.innerText || row.textContent || "");
+          const name = normalize(row.querySelector(".geek-name")?.innerText || "");
+          const unreadHint = Boolean(
+            row.querySelector(".unread,.badge,.badge-num,.message-count,.red-dot") ||
+              /未读|new/i.test(text)
+          );
+          const r = row.getBoundingClientRect();
+          return {
+            index,
+            name,
+            text,
+            signature: `${name}|${text}`,
+            unreadHint,
+            rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+          };
+        })
+        .filter((row) => row.name)
+        .filter((row) => row.rect.width > 30 && row.rect.height > 20)
+        .filter((row) => !position || row.text.includes(position))
+        .filter((row) => !onlyUnread || row.unreadHint);
+    },
+    { position: args.position, onlyUnread: args.onlyUnread }
+  );
+}
+
+async function resetListToTop(page) {
+  await safePageEval(page, () => {
+    const list =
+      document.querySelector(".user-list.b-scroll-stable") ||
+      document.querySelector(".user-list") ||
+      document.scrollingElement;
+    if (list) list.scrollTop = 0;
+  });
+  await sleep(700);
+}
+
+async function scrollCandidateList(page) {
+  const state = await safePageEval(page, () => {
+    const list =
+      document.querySelector(".user-list.b-scroll-stable") ||
+      document.querySelector(".user-list") ||
+      document.scrollingElement;
+    if (!list) return { moved: false, reason: "candidate list not found" };
+    const before = list.scrollTop;
+    list.scrollTop += Math.max(480, Math.floor((list.clientHeight || 700) * 0.75));
+    return {
+      moved: list.scrollTop !== before,
+      top: list.scrollTop,
+      height: list.scrollHeight,
+      client: list.clientHeight,
+    };
+  });
+  await sleep(500);
+  return state || { moved: false, reason: "scroll failed" };
+}
+
+async function clickVisibleRow(page, row) {
+  const target = await safePageEval(page, ({ signature, name, text }) => {
+    const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
+    const rows = [...document.querySelectorAll(".geek-item-wrap,.geek-item")];
+    const match =
+      rows.find((el) => `${normalize(el.querySelector(".geek-name")?.innerText || "")}|${normalize(el.innerText || el.textContent || "")}` === signature) ||
+      rows.find((el) => {
+        const rowText = normalize(el.innerText || el.textContent || "");
+        const rowName = normalize(el.querySelector(".geek-name")?.innerText || "");
+        return rowName === name && rowText === text;
+      }) ||
+      rows.find((el) => {
+        const rowText = normalize(el.innerText || el.textContent || "");
+        const rowName = normalize(el.querySelector(".geek-name")?.innerText || "");
+        return rowName === name && rowText.includes(text.slice(0, 80));
+      });
+    if (!match) return { ok: false, reason: "visible row disappeared before click" };
+    match.scrollIntoView({ block: "center" });
+    const clickTarget =
+      match.querySelector(".geek-name") ||
+      match.querySelector(".content") ||
+      match.querySelector(".info-primary") ||
+      match;
+    const r = clickTarget.getBoundingClientRect();
+    const rowRect = match.getBoundingClientRect();
+    return {
+      ok: true,
+      text: normalize(match.innerText || match.textContent || ""),
+      rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+      rowRect: { left: rowRect.left, top: rowRect.top, width: rowRect.width, height: rowRect.height },
+    };
+  }, row);
+
+  if (!target || !target.ok) return target || { ok: false, reason: "visible row not found" };
+  const rect = target.rect && target.rect.width > 0 && target.rect.height > 0 ? target.rect : target.rowRect;
+  if (!rect || rect.width <= 0 || rect.height <= 0) return { ...target, ok: false, reason: "visible row has no clickable rect" };
+
+  const x = rect.left + Math.min(Math.max(rect.width / 2, 18), Math.max(rect.width - 8, 18));
+  const y = rect.top + rect.height / 2;
+  try {
+    await page.mouse.move(x, y);
+    await sleep(100);
+    await page.mouse.click(x, y, { delay: 140 });
+  } catch (error) {
+    return { ...target, ok: false, reason: `trusted row click failed: ${error.message || error}` };
+  }
+  const panel = await waitForCandidatePanel(page, row.name);
+  return { ...target, panelReady: panel.ready, panelText: panel.text, panelReason: panel.reason };
+}
+
+async function readCandidateFromVisibleRow(page, row) {
+  await page.keyboard.press("Escape").catch(() => {});
+  await sleep(350);
+
+  const clicked = await clickVisibleRow(page, row);
+  if (!clicked || !clicked.ok) {
+    return { name: row.name, row, error: clicked ? clicked.reason : "candidate row click failed" };
+  }
+  await sleep(clicked.panelReady ? 700 : 1600);
+
+  const headerText = await safePageEval(page, () => {
+    const box =
+      document.querySelector(".base-info-single-container") ||
+      document.querySelector(".conversation-main") ||
+      document.body;
+    return String(box.innerText || box.textContent || "").replace(/\s+/g, " ").trim().slice(0, 3000);
+  }).catch(() => "");
+
+  const opened = await openOnlineResume(page);
+  if (!opened || !opened.ok) {
+    return {
+      name: row.name,
+      row,
+      clickedText: clicked.text,
+      panelReady: clicked.panelReady,
+      panelReason: clicked.panelReason,
+      panelText: clicked.panelText,
+      headerText,
+      resumeButtonProbe: opened,
+      error: opened ? opened.reason : "online resume button not found",
+    };
+  }
+
+  await sleep(3000);
+  const detail = await readWasmResumeDetail(page, row.name);
+  const canvasText = await readCanvasText(page, row.name);
+  await closeResume(page);
+  await sleep(600);
+
+  return {
+    name: row.name,
+    row,
+    clickedText: clicked.text,
+    headerText,
+    detail: summarizeDetail(detail),
+    rawDetail: detail,
+    canvasText,
+    error: detail || canvasText ? undefined : "online resume opened but no structured/canvas content captured",
+  };
+}
+
+async function readVisibleRowsSinglePass(page, args, output) {
+  const seen = new Set();
+  let stagnant = 0;
+  await resetListToTop(page);
+
+  for (let step = 0; step < 120 && stagnant < 10; step += 1) {
+    const visibleRows = (await getVisibleRows(page, args)) || [];
+    let processedThisStep = 0;
+    for (const row of visibleRows) {
+      if (args.limit > 0 && output.results.length >= args.limit) return;
+      if (!row.signature || seen.has(row.signature)) continue;
+      seen.add(row.signature);
+      output.rows.push(row);
+      console.error(`reading visible row: ${row.name}`);
+      const result = await readCandidateFromVisibleRow(page, row);
+      output.results.push(result);
+      fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
+      processedThisStep += 1;
+    }
+
+    if (processedThisStep > 0) stagnant = 0;
+    else stagnant += 1;
+
+    const scrollState = await scrollCandidateList(page);
+    console.error(`single-pass step ${step}: visible ${visibleRows.length}, processed ${processedThisStep}, total ${output.results.length}`);
+    if (!scrollState.moved) stagnant += 1;
+  }
+}
+
 async function clickRow(page, target, position) {
   await safePageEval(page, () => {
     const list =
@@ -578,7 +771,6 @@ async function main() {
   }));
   console.error(`connected: ${pageInfo.url}`);
 
-  const rows = await scanCurrentList(page, args);
   const output = {
     meta: {
       createdAt: new Date().toISOString(),
@@ -586,77 +778,28 @@ async function main() {
       browserUrl: args.browserUrl,
       onlyUnread: args.onlyUnread,
       pageUrl: pageInfo.url,
-      scannedRows: rows.length,
+      scannedRows: 0,
+      mode: args.scanOnly ? "scan-only" : "single-pass-read-visible-rows",
       bossSideActionsPerformed: 0,
     },
-    rows,
+    rows: [],
     results: [],
   };
 
   fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
-  console.error(`scan complete: ${rows.length} row(s)`);
   if (args.scanOnly) {
+    const rows = await scanCurrentList(page, args);
+    output.rows = rows;
+    output.meta.scannedRows = rows.length;
+    fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
+    console.error(`scan complete: ${rows.length} row(s)`);
     await browser.disconnect();
     return;
   }
 
-  for (const row of rows) {
-    console.error(`reading: ${row.name}`);
-    await page.keyboard.press("Escape").catch(() => {});
-    await sleep(500);
-
-    const clicked = await clickRow(page, row, args.position);
-    if (!clicked.ok) {
-      output.results.push({ name: row.name, row, error: clicked.reason || "candidate row not found" });
-      fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
-      continue;
-    }
-    await sleep(clicked.panelReady ? 700 : 1600);
-
-    const headerText = await safePageEval(page, () => {
-      const box =
-        document.querySelector(".base-info-single-container") ||
-        document.querySelector(".conversation-main") ||
-        document.body;
-      return String(box.innerText || box.textContent || "").replace(/\s+/g, " ").trim().slice(0, 3000);
-    }).catch(() => "");
-
-    const opened = await openOnlineResume(page);
-    if (!opened || !opened.ok) {
-      output.results.push({
-        name: row.name,
-        row,
-        clickedText: clicked.text,
-        panelReady: clicked.panelReady,
-        panelReason: clicked.panelReason,
-        panelText: clicked.panelText,
-        headerText,
-        resumeButtonProbe: opened,
-        error: opened ? opened.reason : "online resume button not found",
-      });
-      fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
-      continue;
-    }
-
-    await sleep(3000);
-    const detail = await readWasmResumeDetail(page, row.name);
-    const canvasText = await readCanvasText(page, row.name);
-
-    output.results.push({
-      name: row.name,
-      row,
-      clickedText: clicked.text,
-      headerText,
-      detail: summarizeDetail(detail),
-      rawDetail: detail,
-      canvasText,
-      error: detail || canvasText ? undefined : "online resume opened but no structured/canvas content captured",
-    });
-    fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
-
-    await closeResume(page);
-    await sleep(600);
-  }
+  await readVisibleRowsSinglePass(page, args, output);
+  output.meta.scannedRows = output.rows.length;
+  fs.writeFileSync(path.resolve(args.out), JSON.stringify(output, null, 2), "utf8");
 
   await browser.disconnect();
   console.error(`saved: ${path.resolve(args.out)}`);
