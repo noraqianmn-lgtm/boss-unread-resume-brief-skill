@@ -26,7 +26,7 @@ Each intern must use their own local BOSS and Feishu authentication.
 - Each user fills their own local `config.json` with the Feishu folder, Bitable, bot, and user settings they are allowed to write to.
 - If several interns should write into the same recruiting Feishu folder or Bitable, grant them Feishu permissions to that resource; do not copy another person's token.
 
-## Installation
+## Install In Codex
 
 In Codex, ask:
 
@@ -40,7 +40,47 @@ Or run the installer script directly:
 python "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py" --url https://github.com/noraqianmn-lgtm/boss-unread-resume-brief-skill/tree/main/skills/boss-unread-resume-brief
 ```
 
-Restart Codex or WorkBuddy after installation so the new skill is discovered.
+Restart Codex after installation so the new skill is discovered.
+
+## Install In WorkBuddy
+
+WorkBuddy uses the local machine's session state: local skills, local browser login, local BOSS recruiter session, and local Feishu token. Install the skill on each intern's computer, then restart WorkBuddy or start a new WorkBuddy conversation so the skill list reloads.
+
+Preferred WorkBuddy install prompt:
+
+```text
+Use $skill-installer to install https://github.com/noraqianmn-lgtm/boss-unread-resume-brief-skill/tree/main/skills/boss-unread-resume-brief
+```
+
+If WorkBuddy cannot invoke `$skill-installer`, install manually in PowerShell:
+
+```powershell
+$skillUrl = "https://github.com/noraqianmn-lgtm/boss-unread-resume-brief-skill/archive/refs/heads/main.zip"
+$zip = "$env:TEMP\boss-unread-resume-brief-skill.zip"
+$extract = "$env:TEMP\boss-unread-resume-brief-skill"
+$dest = "$env:USERPROFILE\.codex\skills\boss-unread-resume-brief"
+$skillsDir = "$env:USERPROFILE\.codex\skills"
+Remove-Item $zip -Force -ErrorAction SilentlyContinue
+Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $skillsDir | Out-Null
+curl.exe -L $skillUrl -o $zip
+Expand-Archive $zip -DestinationPath $extract
+Copy-Item "$extract\boss-unread-resume-brief-skill-main\skills\boss-unread-resume-brief" $dest -Recurse
+```
+
+After manual installation, restart WorkBuddy or open a new WorkBuddy chat. Then invoke:
+
+```text
+Use $boss-unread-resume-brief.
+```
+
+WorkBuddy run notes:
+
+- Keep the BOSS browser already on the target position's unread-greetings list before asking WorkBuddy to read resumes.
+- Do not ask WorkBuddy to bring BOSS to the front, click candidates with mouse automation, or navigate to the position automatically.
+- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. It avoids CDP mouse input because BOSS can route to `/web/chat/recommend` when mouse events are sent.
+- If WorkBuddy reports that the skill was installed but still cannot see it, restart WorkBuddy rather than continuing in the same chat.
 
 ## First-Time Setup
 
