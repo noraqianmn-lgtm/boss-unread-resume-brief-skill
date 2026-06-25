@@ -102,6 +102,8 @@ For a safer full run, use:
 node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --min-delay-ms 15000 --max-delay-ms 30000 --batch-pause-every 4 --batch-pause-ms 120000 --throttle-cooldown-ms 180000 --out online_resumes.json
 ```
 
+In the output JSON, `opened: true` only means the resume button was clicked. Treat a candidate as successfully read only when `source` is `"online-resume"` or `rawDetail` / `canvasText` is present. If `source` is `"panel-or-fallback"`, the content may be BOSS's candidate analyzer or a throttling page, not the full online resume.
+
 ## Typical Prompt
 
 ```text
