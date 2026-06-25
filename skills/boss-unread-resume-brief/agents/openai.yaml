@@ -1,7 +1,7 @@
 interface:
   display_name: "BOSS 未读招呼简报"
   short_description: "自动读取当前职位在线简历并生成飞书招聘日报"
-  default_prompt: "Use $boss-unread-resume-brief to clarify ABC screening criteria, automatically read the current BOSS position's online resumes with keyboard automation, optionally filter by unread or since-date, and generate a Feishu recruiting brief."
+  default_prompt: "Use $boss-unread-resume-brief to clarify ABC screening criteria, automatically read the current BOSS position's online resumes with hybrid keyboard/DOM/iframe fallback, optionally filter by unread or since-date, and generate a Feishu recruiting brief."
 
 policy:
   allow_implicit_invocation: true
