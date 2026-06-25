@@ -19,10 +19,14 @@ const outPath = arg("out", `online_resumes_${new Date().toISOString().slice(0, 1
 const limit = Number(arg("limit", "0"));
 const showHelp = process.argv.includes("--help") || process.argv.includes("-h");
 const scanOnly = process.argv.includes("--scan-only");
+let autoRead = process.argv.includes("--auto-read") || process.argv.includes("--read-current-position");
 const currentOpenResume = process.argv.includes("--current-open-resume");
 const unsafeAutoClick = process.argv.includes("--unsafe-auto-click");
 const appendOutput = process.argv.includes("--append");
 const onlyUnread = process.argv.includes("--only-unread");
+const sinceDate = arg("since-date", "");
+const includeUnknownDate = process.argv.includes("--include-unknown-date");
+const autoMethod = arg("auto-method", "keyboard");
 const minDelayMs = Number(arg("min-delay-ms", "10000"));
 const maxDelayMs = Number(arg("max-delay-ms", "18000"));
 const batchPauseEvery = Number(arg("batch-pause-every", "5"));
@@ -137,6 +141,19 @@ async function evalExpr(send, expression, options = {}) {
   return msg.result.result.value;
 }
 
+async function pressKey(send, key) {
+  const map = {
+    Enter: { windowsVirtualKeyCode: 13, code: "Enter", key: "Enter" },
+    Escape: { windowsVirtualKeyCode: 27, code: "Escape", key: "Escape" },
+    Space: { windowsVirtualKeyCode: 32, code: "Space", key: " " },
+  };
+  const data = map[key];
+  if (!data) throw new Error(`Unsupported key: ${key}`);
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", ...data }).catch(() => {});
+  await sleep(80);
+  await send("Input.dispatchKeyEvent", { type: "keyUp", ...data }).catch(() => {});
+}
+
 async function enablePageIntrospection(send) {
   await send("Runtime.enable").catch(() => {});
   await send("Page.enable").catch(() => {});
@@ -216,7 +233,34 @@ async function getVisibleRows(send) {
   return evalExpr(send, `(() => {
     const position = ${js(position)};
     const onlyUnread = ${JSON.stringify(onlyUnread)};
+    const sinceDate = ${js(sinceDate)};
+    const includeUnknownDate = ${JSON.stringify(includeUnknownDate)};
     const normalize = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+    const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const parseSince = (value) => {
+      if (!value) return null;
+      const m = String(value).match(/^(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2})$/);
+      if (!m) return null;
+      return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
+    };
+    const sinceTs = parseSince(sinceDate);
+    const parseRowDate = (text) => {
+      const now = new Date();
+      const today = dayStart(now);
+      if (/刚刚|今天/.test(text)) return { text: 'today', timestamp: today };
+      if (/昨天/.test(text)) return { text: 'yesterday', timestamp: today - 86400000 };
+      let m = text.match(/(20\\d{2})[.\\/-](\\d{1,2})[.\\/-](\\d{1,2})/);
+      if (m) return {
+        text: m[0],
+        timestamp: new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime()
+      };
+      m = text.match(/(^|[^\\d])(\\d{1,2})[.\\/-](\\d{1,2})(?=\\s|$|[^\\d])/);
+      if (m) return {
+        text: m[0].trim(),
+        timestamp: new Date(now.getFullYear(), Number(m[2]) - 1, Number(m[3])).getTime()
+      };
+      return { text: '', timestamp: null };
+    };
     return [...document.querySelectorAll('.geek-item-wrap,.geek-item')]
       .map((row, index) => {
         const text = normalize(row.innerText || row.textContent || '');
@@ -225,6 +269,7 @@ async function getVisibleRows(send) {
           row.querySelector('.unread,.badge,.badge-num,.message-count,.red-dot') ||
           /未读|new/i.test(text)
         );
+        const date = parseRowDate(text);
         const r = row.getBoundingClientRect();
         return {
           index,
@@ -232,13 +277,20 @@ async function getVisibleRows(send) {
           text,
           signature: name + '|' + text,
           unreadHint,
+          dateText: date.text,
+          dateTimestamp: date.timestamp,
           rect: { left: r.left, top: r.top, width: r.width, height: r.height }
         };
       })
       .filter((row) => row.name)
       .filter((row) => row.rect.width > 30 && row.rect.height > 20)
       .filter((row) => !position || row.text.includes(position))
-      .filter((row) => !onlyUnread || row.unreadHint);
+      .filter((row) => !onlyUnread || row.unreadHint)
+      .filter((row) => {
+        if (!sinceTs) return true;
+        if (row.dateTimestamp === null) return includeUnknownDate;
+        return row.dateTimestamp >= sinceTs;
+      });
   })()`);
 }
 
@@ -284,6 +336,49 @@ function candidateListHelperSource() {
         document.scrollingElement;
     };
   `;
+}
+
+async function focusRowForKeyboard(send, row) {
+  return evalExpr(send, `(() => {
+    const signature = ${js(row.signature)};
+    const name = ${js(row.name)};
+    const normalize = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+    const rows = [...document.querySelectorAll('.geek-item-wrap,.geek-item')];
+    const target = rows.find((el) => {
+      const rowName = normalize(el.querySelector('.geek-name')?.innerText || '');
+      const text = normalize(el.innerText || el.textContent || '');
+      return rowName + '|' + text === signature;
+    }) || rows.find((el) => {
+      const rowName = normalize(el.querySelector('.geek-name')?.innerText || '');
+      const text = normalize(el.innerText || el.textContent || '');
+      return rowName === name && text.includes(${js((row.text || "").slice(0, 80))});
+    });
+    if (!target) return { ok: false, reason: 'visible row disappeared before keyboard focus' };
+    target.scrollIntoView({ block: 'center' });
+    const focusTarget = target.querySelector('a,button,[tabindex],.geek-name,.content') || target;
+    if (!focusTarget.hasAttribute('tabindex')) focusTarget.setAttribute('tabindex', '-1');
+    focusTarget.focus({ preventScroll: true });
+    return {
+      ok: document.activeElement === focusTarget || target.contains(document.activeElement),
+      text: normalize(target.innerText || target.textContent || ''),
+      activeTag: document.activeElement && document.activeElement.tagName,
+      activeClass: String(document.activeElement && document.activeElement.className || '').slice(0, 120)
+    };
+  })()`);
+}
+
+async function selectRowKeyboard(send, row) {
+  const focused = await focusRowForKeyboard(send, row);
+  if (!focused.ok) return focused;
+  await pressKey(send, "Enter");
+  await sleep(700);
+  let panel = await waitForPanel(send, row.name);
+  if (!panel.ready) {
+    await pressKey(send, "Space");
+    await sleep(700);
+    panel = await waitForPanel(send, row.name);
+  }
+  return { ...focused, panel };
 }
 
 async function dispatchRowClick(send, row) {
@@ -335,6 +430,60 @@ async function waitForPanel(send, name) {
     await sleep(350);
   }
   return { ready: false, text: "", reason: "candidate detail panel did not load" };
+}
+
+async function focusOnlineResumeButton(send) {
+  return evalExpr(send, `(() => {
+    const candidates = [...document.querySelectorAll('a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]')]
+      .map((el) => {
+        const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, '');
+        const cls = String(el.className || '');
+        const title = String(el.getAttribute('title') || '');
+        const aria = String(el.getAttribute('aria-label') || '');
+        const href = String(el.getAttribute('href') || '');
+        const r = el.getBoundingClientRect();
+        const visible = r.width > 12 && r.height > 12 && r.bottom > 0 && r.right > 0;
+        const haystack = (text + ' ' + cls + ' ' + title + ' ' + aria + ' ' + href).toLowerCase();
+        let score = 0;
+        if (text.includes('在线简历') || title.includes('在线简历') || aria.includes('在线简历')) score += 100;
+        if (text.includes('查看简历') || title.includes('查看简历') || aria.includes('查看简历')) score += 80;
+        if (cls.includes('resume-btn-online')) score += 90;
+        if (haystack.includes('online') && haystack.includes('resume')) score += 70;
+        if (haystack.includes('resume')) score += 30;
+        if (text.includes('简历') || title.includes('简历') || aria.includes('简历')) score += 25;
+        if (text.includes('附件简历') || title.includes('附件简历') || aria.includes('附件简历')) score -= 15;
+        return { el, visible, score, text: text.slice(0, 80), cls: cls.slice(0, 120), title, aria, href };
+      })
+      .filter((item) => item.visible && item.score > 0)
+      .sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+    if (!best) return { ok: false, reason: 'online resume button not found', candidates: candidates.slice(0, 20).map(({el, ...rest}) => rest) };
+    best.el.scrollIntoView({ block: 'center' });
+    if (!best.el.hasAttribute('tabindex')) best.el.setAttribute('tabindex', '0');
+    best.el.focus({ preventScroll: true });
+    return {
+      ok: document.activeElement === best.el || best.el.contains(document.activeElement),
+      button: { score: best.score, text: best.text, cls: best.cls, title: best.title, aria: best.aria, href: best.href }
+    };
+  })()`);
+}
+
+async function openOnlineResumeKeyboard(send) {
+  const focused = await focusOnlineResumeButton(send);
+  if (!focused.ok) return focused;
+  await pressKey(send, "Enter");
+  await sleep(1200);
+  await refreshFrameTree(send);
+  if (resumeContextIds().length > 0) return { ok: true, method: "keyboard-enter", button: focused.button };
+  await pressKey(send, "Space");
+  await sleep(1200);
+  await refreshFrameTree(send);
+  return {
+    ok: resumeContextIds().length > 0,
+    method: "keyboard-enter-space",
+    button: focused.button,
+    reason: resumeContextIds().length > 0 ? undefined : "online resume iframe did not appear after keyboard activation",
+  };
 }
 
 async function openOnlineResume(send) {
@@ -474,6 +623,11 @@ async function closeModal(send) {
   })()`);
 }
 
+async function closeModalKeyboard(send) {
+  await pressKey(send, "Escape").catch(() => {});
+  await sleep(500);
+}
+
 async function scrollList(send) {
   return evalExpr(send, `(() => {
     ${candidateListHelperSource()}
@@ -483,6 +637,73 @@ async function scrollList(send) {
     list.scrollTop += Math.max(480, Math.floor((list.clientHeight || 700) * 0.75));
     return { moved: list.scrollTop !== before, top: list.scrollTop, height: list.scrollHeight, client: list.clientHeight };
   })()`);
+}
+
+async function readOneCandidateKeyboard(send, row, attempt) {
+  if (attempt > 0) {
+    await politeDelay(`retrying ${row.name}, attempt ${attempt + 1}`, throttleCooldownMs, throttleCooldownMs + 30000);
+  }
+
+  const selected = await selectRowKeyboard(send, row);
+  if (!selected.ok) {
+    return { name: row.name, row, attempt, error: selected.reason || "keyboard row focus failed", focusProbe: selected };
+  }
+  const panel = selected.panel || { ready: false, text: "" };
+  if (!panel.ready) {
+    return {
+      name: row.name,
+      row,
+      attempt,
+      clickedText: selected.text,
+      panelReady: false,
+      profile: panel.text || "",
+      error: panel.reason || "candidate detail panel did not load after keyboard selection",
+      focusProbe: selected,
+    };
+  }
+
+  const profile = panel.text || "";
+  const beforeOpenThrottle = await getThrottleState(send);
+  if (beforeOpenThrottle.throttled) {
+    return {
+      name: row.name,
+      row,
+      attempt,
+      clickedText: selected.text,
+      panelReady: panel.ready,
+      profile,
+      throttle: beforeOpenThrottle,
+      error: "possible BOSS throttling before opening online resume",
+    };
+  }
+
+  const opened = await openOnlineResumeKeyboard(send);
+  await sleep(opened.ok ? 3200 : 800);
+  const afterOpenThrottle = await getThrottleState(send);
+  const rawDetail = opened.ok ? await readWasmResumeDetail(send, row.name) : null;
+  const canvasText = opened.ok ? await readCanvasText(send, row.name) : "";
+  const resumeText = opened.ok ? await readResumeText(send, row.name) : "";
+  const source = rawDetail || canvasText ? "online-resume" : "panel-or-fallback";
+
+  return {
+    name: row.name,
+    row,
+    attempt,
+    clickedText: selected.text,
+    panelReady: panel.ready,
+    profile,
+    opened: opened.ok,
+    source,
+    detail: summarizeDetail(rawDetail),
+    rawDetail,
+    canvasText,
+    headerText: profile,
+    resumeText,
+    modalText: resumeText,
+    throttle: afterOpenThrottle.throttled ? afterOpenThrottle : undefined,
+    resumeButtonProbe: opened.ok ? undefined : opened,
+    error: opened.ok && source === "online-resume" ? undefined : (opened.ok ? "online resume did not yield structured/canvas content" : opened.reason),
+  };
 }
 
 async function readOneCandidate(send, row, attempt) {
@@ -583,21 +804,29 @@ function readExistingOutput(file) {
 async function main() {
   if (showHelp) {
     console.error(`Usage:
+  Auto-read current position candidates with keyboard automation:
+    node read-current-chat-online-resumes-cdp.js --position "<position>" --out online_resumes.json
+
+  Auto-read only unread greetings:
+    node read-current-chat-online-resumes-cdp.js --position "<position>" --only-unread --out online_resumes.json
+
+  Auto-read greetings since a date:
+    node read-current-chat-online-resumes-cdp.js --position "<position>" --since-date YYYY-MM-DD --out online_resumes.json
+
   Safe list scan:
     node read-current-chat-online-resumes-cdp.js --position "<position>" --scan-only --out online_resumes.json
 
-  Safe online-resume read after the user manually opens "在线简历":
+  Fallback read after the user manually opens "在线简历":
     node read-current-chat-online-resumes-cdp.js --current-open-resume --append --out online_resumes.json
 
-  Legacy debug only, may trigger BOSS refresh:
-    node read-current-chat-online-resumes-cdp.js --unsafe-auto-click --limit 3 --out unsafe_test.json`);
+  Legacy DOM-click debug only, may trigger BOSS refresh:
+    node read-current-chat-online-resumes-cdp.js --position "<position>" --auto-method dom --limit 3 --out dom_click_test.json`);
     return;
   }
 
-  if (!scanOnly && !currentOpenResume && !unsafeAutoClick) {
-    throw new Error(
-      "Choose a mode before connecting to BOSS: --scan-only, --current-open-resume, or --unsafe-auto-click. Safe WorkBuddy usage should use --scan-only first, then --current-open-resume --append after the user manually opens an online resume."
-    );
+  if (!scanOnly && !currentOpenResume && !unsafeAutoClick && !autoRead) autoRead = true;
+  if (autoMethod !== "keyboard" && autoMethod !== "dom") {
+    throw new Error("--auto-method must be keyboard or dom");
   }
 
   const wsUrl = await resolveWsUrl();
@@ -620,9 +849,16 @@ async function main() {
         ? "current-open-resume-no-clicks"
         : scanOnly
           ? "scan-only-no-clicks"
+          : autoRead
+            ? `auto-read-${autoMethod}`
           : unsafeAutoClick
             ? "unsafe-auto-click-legacy"
             : "blocked-no-clicks",
+      filter: {
+        onlyUnread,
+        sinceDate,
+        includeUnknownDate,
+      },
       bossSideActionsPerformed: 0,
     },
     rows: [],
@@ -666,10 +902,10 @@ async function main() {
     return;
   }
 
-  if (!unsafeAutoClick) {
+  if (!autoRead && !unsafeAutoClick) {
     ws.close();
     throw new Error(
-      "Automated BOSS candidate/resume clicking is disabled because synthetic clicks can trigger /web/chat/recommend refresh. Use --scan-only, or ask the user to manually open a candidate's online resume and run --current-open-resume --append. Use --unsafe-auto-click only for deliberate legacy debugging."
+      "Choose --auto-read, --scan-only, --current-open-resume, or --unsafe-auto-click."
     );
   }
 
@@ -690,18 +926,24 @@ async function main() {
 
       let result = null;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-        result = await readOneCandidate(send, row, attempt);
+        result = autoRead && autoMethod === "keyboard"
+          ? await readOneCandidateKeyboard(send, row, attempt)
+          : await readOneCandidate(send, row, attempt);
         const weak = isResumeReadWeak(result);
         const throttled = Boolean(result.throttle && result.throttle.throttled);
         if (!weak && !throttled) break;
         if (attempt >= maxRetries) break;
         console.error(`weak/throttled read for ${row.name}: ${result.error || "resume text too short"}`);
-        await closeModal(send);
+        if (autoRead && autoMethod === "keyboard") await closeModalKeyboard(send);
+        else await closeModal(send);
       }
 
       output.results.push(result);
       fs.writeFileSync(resolvedOut, JSON.stringify(output, null, 2), "utf8");
-      if (result && result.opened) await closeModal(send);
+      if (result && result.opened) {
+        if (autoRead && autoMethod === "keyboard") await closeModalKeyboard(send);
+        else await closeModal(send);
+      }
       processed += 1;
 
       if (batchPauseEvery > 0 && output.results.length % batchPauseEvery === 0) {
