@@ -81,7 +81,7 @@ WorkBuddy run notes:
 
 - Keep the BOSS browser already on the target position's candidate/chat list before asking WorkBuddy to read resumes. Use `--only-unread` when the user wants only unread greetings.
 - Do not ask WorkBuddy to bring BOSS to the front, click candidates with mouse automation, dispatch DOM clicks, or navigate to the position automatically.
-- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. Default auto-read mode uses keyboard focus/Enter/Escape, supports `--only-unread` and `--since-date`, and avoids mouse events.
+- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. Default auto-read mode is hybrid: keyboard candidate selection plus online-resume fallback through keyboard activation, in-page DOM activation, and `/web/frame/c-resume/` iframe URL discovery. It supports `--only-unread` and `--since-date`.
 - If WorkBuddy reports that the skill was installed but still cannot see it, restart WorkBuddy rather than continuing in the same chat.
 
 ## First-Time Setup
@@ -145,7 +145,7 @@ Do not add `--reset-to-top` by default. BOSS uses a virtual scrolling list; forc
 
 Do not downgrade to chat-summary-only reporting unless the recruiter explicitly accepts that online resumes could not be read.
 
-The recommended reader is `read-current-chat-online-resumes-cdp.js`. Its default auto-read mode does not use CDP mouse input, DOM `dispatchEvent`, `.click()`, bring the page to front, or reset the list position. It focuses visible candidate rows and online-resume buttons, then uses keyboard Enter/Escape.
+The recommended reader is `read-current-chat-online-resumes-cdp.js`. Its default auto-read mode does not use CDP mouse input, bring the page to front, or reset the list position. It selects candidate rows with keyboard focus/Enter, then opens online resumes with hybrid fallback: keyboard activation, the earlier successful in-page DOM activation, and direct `/web/frame/c-resume/` iframe URL discovery.
 
 Auto-read the current position:
 
@@ -171,6 +171,13 @@ Diagnostic scan without opening resumes:
 
 ```powershell
 node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --scan-only --limit 10 --out scan_test.json
+```
+
+If online resumes still do not open, inspect `openAttempts` in the JSON and run a small diagnostic:
+
+```powershell
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --auto-method keyboard --limit 3 --out keyboard_test.json
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --auto-method dom --limit 3 --out dom_test.json
 ```
 
 The reader is intentionally slow to avoid BOSS throttling. Defaults:
