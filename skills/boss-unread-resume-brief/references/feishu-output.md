@@ -7,7 +7,7 @@ Use this reference when creating the Feishu document, writing Bitable records, o
 Write the report to a local Markdown file first. Then run from the directory containing the file:
 
 ```powershell
-lark-cli docs +create --title "<title>" --folder-token "<folder_token>" --markdown "@report.md" --as user
+lark-cli docs +create --title "<title>" --folder-token "<folder_token>" --markdown "@report.md"
 ```
 
 Use relative `@report.md` paths. `lark-cli` rejects absolute file paths for some commands.
@@ -17,7 +17,7 @@ Use relative `@report.md` paths. `lark-cli` rejects absolute file paths for some
 For appending chunks:
 
 ```powershell
-lark-cli docs +update --doc "<doc_id>" --mode append --markdown "@append.md" --as user
+lark-cli docs +update --doc "<doc_id>" --mode append --markdown "@append.md"
 ```
 
 ## Bitable Records
@@ -36,7 +36,7 @@ Use lark-cli simplified JSON:
 Write records with:
 
 ```powershell
-lark-cli base +record-batch-create --base-token "<base_token>" --table-id "<table_id>" --json "@records.json" --as user
+lark-cli base +record-batch-create --base-token "<base_token>" --table-id "<table_id>" --json "@records.json"
 ```
 
 Again, use a relative `@records.json` path from the current directory.
@@ -66,4 +66,3 @@ node <skill-dir>\scripts\send-feishu-msg.js --brief brief_data.json
   "note": "BOSS-side actions performed: 0"
 }
 ```
-
