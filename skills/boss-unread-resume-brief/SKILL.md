@@ -32,6 +32,7 @@ npm install -g @joohw/boss-cli @larksuite/cli --registry=https://registry.npmmir
 
 5. For a user-friendly Windows setup, ask the user to run `scripts\setup-windows.cmd` from the installed skill folder in an external CMD window. The script is English-only to avoid Windows batch encoding issues.
 6. Ask this user to run `boss login` on their own machine and log into the BOSS recruiter account they are allowed to use.
+   - If `read-current-chat-online-resumes-cdp.js` fails with `ECONNREFUSED 127.0.0.1:53470`, the visible BOSS page is probably a normal browser page, not the debug Chrome opened by `boss-cli`. Ask the user to run `boss login` again, or run `boss list --unread` once to launch the debuggable BOSS browser, then manually return to the target position list.
 7. Ask this user to run Feishu login with the current lark-cli sequence:
 
 ```cmd
@@ -52,7 +53,7 @@ lark-cli auth login
    Read `references/screening-criteria.md` when criteria need structuring.
 4. Show the criteria back to the user and ask whether to proceed. If the user says "沿用", use the last confirmed criteria in the thread.
 5. Ask the user to open BOSS recruiting chat with their own logged-in recruiter session and choose the target position. Ask whether to read only unread greetings or all greetings after a date if the user has not specified this.
-6. Read online resumes automatically from the current position list. Default automation is `--auto-method hybrid`: select candidates by keyboard focus/Enter, then open "在线简历" by trying keyboard activation, the earlier successful in-page DOM activation, and direct `/web/frame/c-resume/` iframe URL discovery in that order:
+6. Read online resumes automatically from the current position list. Default automation is `--auto-method hybrid`: select candidates by keyboard focus/Enter, fall back to precise candidate-row DOM activation only when the right detail panel is not selected, then open "在线简历" only from the right-side detail panel by trying keyboard activation, scoped in-page DOM activation, and direct `/web/frame/c-resume/` iframe URL discovery in that order:
 
 ```powershell
 node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<position>" --out online_resumes_<date>.json
@@ -76,7 +77,7 @@ node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<po
 
 Use `--include-unknown-date` only if the user accepts reading rows whose greeting date cannot be parsed from the visible BOSS row.
 
-Use `read-current-chat-online-resumes-cdp.js` as the default reader. Do not use Puppeteer or CDP mouse input. The default hybrid method keeps candidate-row selection on keyboard automation, then uses the old successful in-page DOM activation only as an online-resume button fallback. Any failed open must remain a failure unless `/web/frame/c-resume/` iframe, `rawDetail`, or `canvasText` appears.
+Use `read-current-chat-online-resumes-cdp.js` as the default reader. Do not use Puppeteer/CDP mouse input or whole-page button searches. The bundled script may use `puppeteer-core` only as a read-only fallback to inspect `/web/frame/c-resume/` frames and canvas text after the online-resume iframe opens. Any failed open must remain a failure unless `/web/frame/c-resume/` iframe, `rawDetail`, or `canvasText` appears.
 
 Do not add `--bring-to-front` or `--reset-to-top` by default. `--bring-to-front` can trigger BOSS to route to `/web/chat/recommend`, and `--reset-to-top` can force the virtual list into a loading state with zero rendered rows. Use the browser exactly where the user placed it: target position plus the desired candidate list.
 
@@ -127,15 +128,15 @@ The BOSS online resume can be rendered through an iframe and canvas/wasm. The bu
 - leaves BOSS native page behavior intact by default; `--stabilize` is a last-resort fallback for refresh/visibility issues;
 - reads the current candidate list with `--scan-only` without selecting candidates;
 - automatically selects visible candidate rows with keyboard focus/Enter;
-- opens online resumes with hybrid fallback: keyboard activation, then the earlier successful in-page DOM activation, then direct `/web/frame/c-resume/` iframe URL discovery;
+- opens online resumes with hybrid fallback: keyboard activation, scoped in-page activation only inside the right detail panel, then direct `/web/frame/c-resume/` iframe URL discovery;
 - supports `--only-unread`, `--since-date YYYY-MM-DD`, and `--include-unknown-date`;
 - keeps `--current-open-resume` only as a fallback for one already-open resume;
-- does not call `page.bringToFront()`, does not send CDP mouse input, does not send DOM mouse events, and does not reset the list to top in the default mode;
+- does not call `page.bringToFront()`, does not send CDP mouse input, does not run whole-page DOM mouse searches, and does not reset the list to top in the default mode;
 - avoids the old two-pass "scan all rows, then find them again" pattern because BOSS uses virtual scrolling and previously scanned rows may no longer exist in the DOM;
 - slows down by default to avoid online-resume throttling and records throttle signals in JSON;
 - marks analyzer/intercept-only content as weak fallback instead of a successful online-resume read;
-- captures structured resume detail where available;
-- captures canvas text where available;
+- captures structured resume detail where available through `get_export_geek_detail_info()`;
+- captures canvas text where available, including a read-only Puppeteer `page.frames()` fallback for BOSS OOPIF/frame-context cases where raw CDP cannot enter the resume frame;
 - writes incremental JSON after each candidate.
 
 If the page keeps jumping, stop automated reading. Ask the user to close the browser, run `boss login`, return to the target position unread list, then rerun `read-current-chat-online-resumes-cdp.js --scan-only --limit 3`. Do not switch to Puppeteer mouse-click based scripts.
