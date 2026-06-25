@@ -4,4 +4,4 @@ node_modules/
 tmp/
 out/
 *.log
-
+tmp_*.json
