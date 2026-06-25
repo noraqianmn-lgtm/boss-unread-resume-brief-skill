@@ -79,9 +79,9 @@ Use $boss-unread-resume-brief.
 
 WorkBuddy run notes:
 
-- Keep the BOSS browser already on the target position's unread-greetings list before asking WorkBuddy to read resumes.
+- Keep the BOSS browser already on the target position's candidate/chat list before asking WorkBuddy to read resumes. Use `--only-unread` when the user wants only unread greetings.
 - Do not ask WorkBuddy to bring BOSS to the front, click candidates with mouse automation, dispatch DOM clicks, or navigate to the position automatically.
-- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. Safe modes are `--scan-only` and `--current-open-resume`; automated clicking is disabled unless `--unsafe-auto-click` is explicitly supplied for debugging.
+- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. Default auto-read mode uses keyboard focus/Enter/Escape, supports `--only-unread` and `--since-date`, and avoids mouse events.
 - If WorkBuddy reports that the skill was installed but still cannot see it, restart WorkBuddy rather than continuing in the same chat.
 
 ## First-Time Setup
@@ -145,25 +145,33 @@ Do not add `--reset-to-top` by default. BOSS uses a virtual scrolling list; forc
 
 Do not downgrade to chat-summary-only reporting unless the recruiter explicitly accepts that online resumes could not be read.
 
-The recommended reader is `read-current-chat-online-resumes-cdp.js`. Its safe modes do not use CDP mouse input, DOM `dispatchEvent`, `.click()`, bring the page to front, or reset the list position.
+The recommended reader is `read-current-chat-online-resumes-cdp.js`. Its default auto-read mode does not use CDP mouse input, DOM `dispatchEvent`, `.click()`, bring the page to front, or reset the list position. It focuses visible candidate rows and online-resume buttons, then uses keyboard Enter/Escape.
 
-Safe scan:
-
-```powershell
-node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --scan-only --out online_resumes.json
-```
-
-Safe online-resume read:
-
-1. User manually clicks a candidate in BOSS.
-2. User manually clicks that candidate's "在线简历".
-3. Agent runs:
+Auto-read the current position:
 
 ```powershell
-node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --current-open-resume --append --out online_resumes.json
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --out online_resumes.json
 ```
 
-Repeat the manual-open/read-current-resume loop for every candidate that must be evaluated.
+Only unread greetings:
+
+```powershell
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --only-unread --out online_resumes.json
+```
+
+Greetings since a date:
+
+```powershell
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --since-date 2026-06-20 --out online_resumes.json
+```
+
+Use `--include-unknown-date` only if the recruiter accepts reading rows whose greeting date cannot be parsed from the visible BOSS row.
+
+Diagnostic scan without opening resumes:
+
+```powershell
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --scan-only --limit 10 --out scan_test.json
+```
 
 The reader is intentionally slow to avoid BOSS throttling. Defaults:
 
@@ -174,7 +182,7 @@ The reader is intentionally slow to avoid BOSS throttling. Defaults:
 For a safer full run, use:
 
 ```powershell
-node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --current-open-resume --append --min-delay-ms 15000 --max-delay-ms 30000 --throttle-cooldown-ms 180000 --out online_resumes.json
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --min-delay-ms 15000 --max-delay-ms 30000 --batch-pause-every 4 --batch-pause-ms 120000 --throttle-cooldown-ms 180000 --out online_resumes.json
 ```
 
 In the output JSON, `opened: true` only means the resume button was clicked. Treat a candidate as successfully read only when `source` is `"online-resume"` or `rawDetail` / `canvasText` is present. If `source` is `"panel-or-fallback"`, the content may be BOSS's candidate analyzer or a throttling page, not the full online resume.
@@ -186,7 +194,15 @@ Use $boss-unread-resume-brief.
 Position: R&D Director La Forge
 Only read unread greetings. I have already opened BOSS recruiting chat on this position's unread list.
 Here are the rough job requirements: ...
-Please first help me clarify A/B/C screening criteria, then scan the unread list. For online resumes, ask me to manually open each candidate's online resume and read only the currently open resume. Generate a Feishu daily brief. Do not take any BOSS disposition actions.
+Please first help me clarify A/B/C screening criteria, then automatically read the current position's online resumes and generate a Feishu daily brief. Do not take any BOSS disposition actions.
+```
+
+```text
+Use $boss-unread-resume-brief.
+Position: 活动支持实习生
+Read greetings since 2026-06-20.
+Here are the rough job requirements: ...
+Please clarify A/B/C criteria, then automatically read online resumes and generate a Feishu daily brief.
 ```
 
 ## Repository Layout
