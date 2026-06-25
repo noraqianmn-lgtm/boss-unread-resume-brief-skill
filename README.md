@@ -80,8 +80,9 @@ Use $boss-unread-resume-brief.
 WorkBuddy run notes:
 
 - Keep the BOSS browser already on the target position's candidate/chat list before asking WorkBuddy to read resumes. Use `--only-unread` when the user wants only unread greetings.
-- Do not ask WorkBuddy to bring BOSS to the front, click candidates with mouse automation, dispatch DOM clicks, or navigate to the position automatically.
-- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. Default auto-read mode is hybrid: keyboard candidate selection plus online-resume fallback through keyboard activation, in-page DOM activation, and `/web/frame/c-resume/` iframe URL discovery. It supports `--only-unread` and `--since-date`.
+- The visible BOSS page must be the debuggable browser opened by `boss-cli`, not a normal Chrome tab. If the reader reports `ECONNREFUSED 127.0.0.1:53470`, run `boss login` again, or run `boss list --unread` once, finish login/risk verification, then manually return to the target position list.
+- Do not ask WorkBuddy to bring BOSS to the front, click candidates with mouse automation, run ad-hoc whole-page DOM clicks, or navigate to the position automatically.
+- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. Default auto-read mode is hybrid: keyboard candidate selection, precise right-panel online-resume button detection, scoped in-page activation, `/web/frame/c-resume/` iframe discovery, and read-only frame/canvas extraction. It supports `--only-unread` and `--since-date`.
 - If WorkBuddy reports that the skill was installed but still cannot see it, restart WorkBuddy rather than continuing in the same chat.
 
 ## First-Time Setup
@@ -145,7 +146,7 @@ Do not add `--reset-to-top` by default. BOSS uses a virtual scrolling list; forc
 
 Do not downgrade to chat-summary-only reporting unless the recruiter explicitly accepts that online resumes could not be read.
 
-The recommended reader is `read-current-chat-online-resumes-cdp.js`. Its default auto-read mode does not use CDP mouse input, bring the page to front, or reset the list position. It selects candidate rows with keyboard focus/Enter, then opens online resumes with hybrid fallback: keyboard activation, the earlier successful in-page DOM activation, and direct `/web/frame/c-resume/` iframe URL discovery.
+The recommended reader is `read-current-chat-online-resumes-cdp.js`. Its default auto-read mode does not use CDP mouse input, bring the page to front, or reset the list position. It selects candidate rows with keyboard focus/Enter, confirms the selected name is loaded in the right detail panel, searches only inside that panel for the real `在线简历` button, then opens online resumes with hybrid fallback: keyboard activation, scoped in-page activation, direct `/web/frame/c-resume/` iframe URL discovery, and read-only iframe/canvas extraction. The read-only Puppeteer fallback is used only to inspect resume frames and canvas text after the iframe exists; it must not be replaced with Puppeteer mouse clicking.
 
 Auto-read the current position:
 
