@@ -35,6 +35,24 @@ const throttleCooldownMs = Number(arg("throttle-cooldown-ms", "90000"));
 const maxRetries = Number(arg("max-retries", "1"));
 const runtimeContexts = new Map();
 const framesById = new Map();
+const cdpSessions = new Map();
+let puppeteerPagePromise = null;
+let puppeteerBrowser = null;
+
+function requirePuppeteerCore() {
+  try {
+    return require("puppeteer-core");
+  } catch (firstError) {
+    const appData = process.env.APPDATA;
+    if (appData) {
+      const bossCliNodeModules = path.join(appData, "npm", "node_modules", "@joohw", "boss-cli", "node_modules");
+      try {
+        return require(path.join(bossCliNodeModules, "puppeteer-core"));
+      } catch (_) {}
+    }
+    throw firstError;
+  }
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -96,20 +114,21 @@ function connect(url) {
   const pending = new Map();
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    const p = pending.get(msg.id);
+    const key = `${msg.sessionId || ""}:${msg.id || ""}`;
+    const p = pending.get(key);
     if (!p) {
       handleCdpEvent(msg);
       return;
     }
-    pending.delete(msg.id);
+    pending.delete(key);
     if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
     else p.resolve(msg);
   };
-  const send = (method, params = {}) =>
+  const send = (method, params = {}, sessionId = "") =>
     new Promise((resolve, reject) => {
       const mid = ++id;
-      pending.set(mid, { resolve, reject });
-      ws.send(JSON.stringify({ id: mid, method, params }));
+      pending.set(`${sessionId || ""}:${mid}`, { resolve, reject });
+      ws.send(JSON.stringify({ id: mid, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   return new Promise((resolve, reject) => {
     ws.onopen = () => resolve({ ws, send });
@@ -118,13 +137,25 @@ function connect(url) {
 }
 
 function handleCdpEvent(msg) {
-  if (msg.method === "Runtime.executionContextCreated") {
+  if (msg.method === "Target.attachedToTarget") {
+    const sessionId = msg.params && msg.params.sessionId;
+    const targetInfo = msg.params && msg.params.targetInfo;
+    if (sessionId) cdpSessions.set(sessionId, targetInfo || {});
+  } else if (msg.method === "Target.detachedFromTarget") {
+    if (msg.params && msg.params.sessionId) cdpSessions.delete(msg.params.sessionId);
+  } else if (msg.method === "Target.targetInfoChanged") {
+    for (const [sessionId, info] of cdpSessions.entries()) {
+      if (info && info.targetId === msg.params.targetInfo.targetId) cdpSessions.set(sessionId, msg.params.targetInfo);
+    }
+  } else if (msg.method === "Runtime.executionContextCreated") {
     const context = msg.params && msg.params.context;
-    if (context && context.id) runtimeContexts.set(context.id, context);
+    if (context && context.id) runtimeContexts.set(`${msg.sessionId || ""}:${context.id}`, { ...context, sessionId: msg.sessionId || "" });
   } else if (msg.method === "Runtime.executionContextDestroyed") {
-    runtimeContexts.delete(msg.params.executionContextId);
+    runtimeContexts.delete(`${msg.sessionId || ""}:${msg.params.executionContextId}`);
   } else if (msg.method === "Runtime.executionContextsCleared") {
-    runtimeContexts.clear();
+    for (const key of [...runtimeContexts.keys()]) {
+      if (key.startsWith(`${msg.sessionId || ""}:`)) runtimeContexts.delete(key);
+    }
   } else if (msg.method === "Page.frameNavigated") {
     const frame = msg.params && msg.params.frame;
     if (frame && frame.id) framesById.set(frame.id, frame);
@@ -132,12 +163,16 @@ function handleCdpEvent(msg) {
 }
 
 async function evalExpr(send, expression, options = {}) {
-  const msg = await send("Runtime.evaluate", {
-    expression,
-    returnByValue: true,
-    awaitPromise: true,
-    ...(options.contextId ? { contextId: options.contextId } : {}),
-  });
+  const msg = await send(
+    "Runtime.evaluate",
+    {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+      ...(options.contextId ? { contextId: options.contextId } : {}),
+    },
+    options.sessionId || ""
+  );
   return msg.result.result.value;
 }
 
@@ -155,6 +190,11 @@ async function pressKey(send, key) {
 }
 
 async function enablePageIntrospection(send) {
+  await send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: false,
+    flatten: true,
+  }).catch(() => {});
   await send("Runtime.enable").catch(() => {});
   await send("Page.enable").catch(() => {});
   await send("Page.addScriptToEvaluateOnNewDocument", {
@@ -189,15 +229,64 @@ async function refreshFrameTree(send) {
   if (tree && tree.result && tree.result.frameTree) visit(tree.result.frameTree);
 }
 
-function resumeContextIds() {
-  const ids = [];
+function resumeContextReaders() {
+  const readers = [];
   for (const context of runtimeContexts.values()) {
     const frameId = context.auxData && context.auxData.frameId;
     const frame = frameId ? framesById.get(frameId) : null;
     const url = String((frame && frame.url) || context.origin || context.name || "");
-    if (url.includes("/web/frame/c-resume/")) ids.push(context.id);
+    if (url.includes("/web/frame/c-resume/")) readers.push({ contextId: context.id, sessionId: context.sessionId || "", url });
+  }
+  return readers;
+}
+
+function resumeContextIds() {
+  return resumeContextReaders().map((reader) => reader.contextId);
+}
+
+function resumeFrameIds() {
+  const ids = [];
+  for (const frame of framesById.values()) {
+    if (String(frame.url || "").includes("/web/frame/c-resume/")) ids.push(frame.id);
   }
   return ids;
+}
+
+function resumeSessionReaders() {
+  const readers = [];
+  for (const [sessionId, info] of cdpSessions.entries()) {
+    const url = String((info && info.url) || "");
+    if (url.includes("/web/frame/c-resume/")) readers.push({ sessionId, url });
+  }
+  return readers;
+}
+
+async function ensureResumeReaders(send) {
+  await refreshFrameTree(send);
+  const existing = resumeContextReaders();
+  if (existing.length > 0) return existing;
+  const sessionReaders = resumeSessionReaders();
+  for (const reader of sessionReaders) {
+    await send("Runtime.enable", {}, reader.sessionId).catch(() => {});
+  }
+  if (sessionReaders.length > 0) return sessionReaders;
+  const created = [];
+  for (const frameId of resumeFrameIds()) {
+    try {
+      const msg = await send("Page.createIsolatedWorld", {
+        frameId,
+        worldName: "bossBriefResumeReader",
+        grantUniveralAccess: true,
+      });
+      const contextId = msg && msg.result && msg.result.executionContextId;
+      if (contextId) created.push({ contextId, sessionId: "", frameId });
+    } catch (_) {}
+  }
+  return [...existing, ...created];
+}
+
+async function ensureResumeContextIds(send) {
+  return (await ensureResumeReaders(send)).map((reader) => reader.contextId).filter(Boolean);
 }
 
 async function waitForResumeFrame(send, timeoutMs = 5000) {
@@ -206,10 +295,20 @@ async function waitForResumeFrame(send, timeoutMs = 5000) {
   while (Date.now() - start < timeoutMs) {
     await refreshFrameTree(send);
     const ids = resumeContextIds();
+    const sessions = resumeSessionReaders();
     last = [...framesById.values()]
       .map((frame) => frame.url || "")
       .filter((url) => url.includes("/web/frame/c-resume/"));
-    if (ids.length > 0 || last.length > 0) return { ok: true, contextIds: ids, urls: last };
+    if (ids.length > 0 || sessions.length > 0 || last.length > 0) {
+      const readers = ids.length > 0 || sessions.length > 0 ? [...resumeContextReaders(), ...sessions] : await ensureResumeReaders(send);
+      return {
+        ok: true,
+        contextIds: readers.map((reader) => reader.contextId).filter(Boolean),
+        sessionIds: readers.map((reader) => reader.sessionId).filter(Boolean),
+        urls: [...new Set([...last, ...readers.map((reader) => reader.url).filter(Boolean)])],
+        frameIds: resumeFrameIds(),
+      };
+    }
     await sleep(300);
   }
   return { ok: false, contextIds: [], urls: last };
@@ -353,6 +452,45 @@ function candidateListHelperSource() {
   `;
 }
 
+function rightPanelHelperSource() {
+  return `
+    const findDetailRoot = () => {
+      const normalizePanelText = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+      const selectors = [
+        '.base-info-single-container',
+        '.conversation-main',
+        '.conversation-box',
+        '.chat-conversation',
+        '[class*="conversation-main"]',
+        '[class*="base-info"]'
+      ];
+      const good = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const text = normalizePanelText(el.innerText || el.textContent || '');
+        return r.left > 480 && r.width > 220 && r.height > 60 &&
+          /在线简历|查看简历|附件简历|沟通职位|期望|牛人分析/.test(text);
+      };
+      for (const selector of selectors) {
+        const found = [...document.querySelectorAll(selector)].filter(good)
+          .sort((a, b) => {
+            const ar = a.getBoundingClientRect();
+            const br = b.getBoundingClientRect();
+            return (ar.width * ar.height) - (br.width * br.height);
+          })[0];
+        if (found) return found;
+      }
+      return [...document.querySelectorAll('div,section,main,aside')]
+        .filter(good)
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return (ar.width * ar.height) - (br.width * br.height);
+        })[0] || null;
+    };
+  `;
+}
+
 async function focusRowForKeyboard(send, row) {
   return evalExpr(send, `(() => {
     const signature = ${js(row.signature)};
@@ -396,6 +534,31 @@ async function selectRowKeyboard(send, row) {
   return { ...focused, panel };
 }
 
+async function selectRowHybrid(send, row) {
+  const keyboard = await selectRowKeyboard(send, row);
+  if (keyboard.ok && keyboard.panel && keyboard.panel.ready) {
+    return { ...keyboard, selectMethod: "keyboard", attempts: [keyboard] };
+  }
+  const dom = await dispatchRowClick(send, row);
+  if (!dom.ok) {
+    return {
+      ok: false,
+      reason: dom.reason || keyboard.reason || "candidate row activation failed",
+      attempts: [keyboard, dom],
+    };
+  }
+  await sleep(1200);
+  const panel = await waitForPanel(send, row.name);
+  return {
+    ok: panel.ready,
+    text: dom.text,
+    panel,
+    selectMethod: "dom-row-activation",
+    attempts: [keyboard, dom],
+    reason: panel.ready ? undefined : (panel.reason || "candidate detail panel did not load after DOM row activation"),
+  };
+}
+
 async function dispatchRowClick(send, row) {
   return evalExpr(send, `(() => {
     const signature = ${js(row.signature)};
@@ -427,8 +590,10 @@ async function waitForPanel(send, name) {
     const state = await evalExpr(send, `(() => {
       const name = ${js(name)};
       const normalize = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-      const text = normalize(document.body.innerText || '');
-      const hasResume = [...document.querySelectorAll('a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]')]
+      ${rightPanelHelperSource()}
+      const root = findDetailRoot();
+      const text = normalize((root || document.body).innerText || (root || document.body).textContent || '');
+      const hasResume = root && [...root.querySelectorAll('a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]')]
         .some((el) => {
           const content = String(el.innerText || el.textContent || '').replace(/\\s+/g, '');
           const cls = String(el.className || '');
@@ -439,7 +604,15 @@ async function waitForPanel(send, name) {
             cls.includes('resume-btn-online') ||
             (cls.toLowerCase().includes('resume') && !content.includes('附件简历'));
         });
-      return { ready: text.includes(name) || hasResume, hasResume, text: text.slice(0, 3000) };
+      return {
+        ready: Boolean(root) && (!name || text.includes(name)),
+        hasResume: Boolean(hasResume),
+        hasRoot: Boolean(root),
+        rootClass: root ? String(root.className || '').slice(0, 120) : '',
+        expectedName: name,
+        matchedName: !name || text.includes(name),
+        text: text.slice(0, 3000)
+      };
     })()`);
     if (state.ready) return state;
     await sleep(350);
@@ -449,6 +622,7 @@ async function waitForPanel(send, name) {
 
 function resumeButtonProbeSource() {
   return `
+    ${rightPanelHelperSource()}
     const collectAttrs = (el) => {
       const attrs = {};
       for (const attr of el.attributes || []) attrs[attr.name] = attr.value;
@@ -463,7 +637,9 @@ function resumeButtonProbeSource() {
       const dataset = Object.values(el.dataset || {}).join(' ');
       const attrs = Object.values(collectAttrs(el)).join(' ');
       const r = el.getBoundingClientRect();
-      const visible = r.width > 12 && r.height > 12 && r.bottom > 0 && r.right > 0;
+      const textLen = text.length;
+      const visible = r.width > 12 && r.height > 12 && r.width <= 180 && r.height <= 56 &&
+        r.left > 480 && r.top > 90 && r.bottom > 0 && r.right > 0 && textLen <= 24;
       const haystack = (text + ' ' + cls + ' ' + title + ' ' + aria + ' ' + href + ' ' + dataset + ' ' + attrs).toLowerCase();
       let score = 0;
       if (text.includes('在线简历') || title.includes('在线简历') || aria.includes('在线简历')) score += 100;
@@ -473,13 +649,19 @@ function resumeButtonProbeSource() {
       if (haystack.includes('online') && haystack.includes('resume')) score += 70;
       if (haystack.includes('resume')) score += 30;
       if (text.includes('简历') || title.includes('简历') || aria.includes('简历')) score += 25;
-      if (text.includes('附件简历') || title.includes('附件简历') || aria.includes('附件简历')) score -= 15;
+      if (text.includes('附件简历') || title.includes('附件简历') || aria.includes('附件简历')) score -= 200;
+      if (text.includes('已获取简历') || title.includes('已获取简历') || aria.includes('已获取简历')) score -= 200;
+      if (/wrap-v2|chat-label|chat-container|page-content|user-list|geek-item|filter/.test(haystack)) score -= 200;
       return { el, visible, score, text: text.slice(0, 80), cls: cls.slice(0, 120), title, aria, href, attrs: collectAttrs(el) };
     };
-    const findResumeButtons = () => [...document.querySelectorAll('a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]')]
+    const findResumeButtons = () => {
+      const root = findDetailRoot();
+      const scope = root || document;
+      return [...scope.querySelectorAll('a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]')]
       .map(scoreResumeButton)
       .filter((item) => item.visible && item.score > 0)
       .sort((a, b) => b.score - a.score);
+    };
   `;
 }
 
@@ -598,6 +780,97 @@ async function openOnlineResumeHybrid(send) {
   };
 }
 
+async function getPuppeteerPage() {
+  if (!puppeteerPagePromise) {
+    puppeteerPagePromise = (async () => {
+      const puppeteer = requirePuppeteerCore();
+      const browser = await puppeteer.connect({ browserURL: browserUrl });
+      puppeteerBrowser = browser;
+      const pages = await browser.pages();
+      return pages.find((page) => page.url().includes("/web/chat/index")) ||
+        pages.find((page) => page.url().includes("zhipin.com")) ||
+        pages[0];
+    })();
+  }
+  return puppeteerPagePromise;
+}
+
+async function closePuppeteer() {
+  if (!puppeteerBrowser) return;
+  try {
+    await puppeteerBrowser.disconnect();
+  } catch (_) {}
+  puppeteerBrowser = null;
+  puppeteerPagePromise = null;
+}
+
+async function closeConnections(ws) {
+  await closePuppeteer();
+  try {
+    if (ws) ws.close();
+  } catch (_) {}
+}
+
+async function readWasmResumeDetailWithPuppeteer(expectedName) {
+  let fallback = null;
+  try {
+    const page = await getPuppeteerPage();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const frames = page.frames().filter((frame) => frame.url().includes("/web/frame/c-resume/"));
+      for (const frame of frames) {
+        try {
+          const detail = await frame.evaluate(
+            async (wasmUrl) => {
+              const mod = await import(wasmUrl);
+              return mod.get_export_geek_detail_info();
+            },
+            RESUME_WASM_URL
+          );
+          if (detail && detail.geekBaseInfo && detail.geekBaseInfo.name === expectedName) return detail;
+          if (detail && detail.geekBaseInfo && !fallback) fallback = detail;
+        } catch (_) {}
+      }
+      await sleep(500);
+    }
+  } catch (_) {}
+  return fallback;
+}
+
+async function readCanvasTextWithPuppeteer(expectedName) {
+  try {
+    const page = await getPuppeteerPage();
+    let targetFrame = null;
+    let fallbackFrame = null;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const frames = page.frames().filter((frame) => frame.url().includes("/web/frame/c-resume/"));
+      for (const frame of frames) {
+        try {
+          const text = await frame.evaluate(() => (window.__bossResumeTexts || []).join(""));
+          if (text && !fallbackFrame) fallbackFrame = frame;
+          if (text && text.includes(expectedName)) {
+            targetFrame = frame;
+            break;
+          }
+        } catch (_) {}
+      }
+      if (targetFrame) break;
+      await sleep(500);
+    }
+    targetFrame = targetFrame || fallbackFrame;
+    if (!targetFrame) return "";
+    const scrollHeight = await targetFrame
+      .evaluate(() => document.body.scrollHeight || document.documentElement.scrollHeight || 4000)
+      .catch(() => 4000);
+    for (let y = 0; y <= scrollHeight + 800; y += 500) {
+      await targetFrame.evaluate((scrollY) => window.scrollTo(0, scrollY), y).catch(() => {});
+      await sleep(220);
+    }
+    return targetFrame.evaluate(() => (window.__bossResumeTexts || []).join("")).catch(() => "");
+  } catch (_) {
+    return "";
+  }
+}
+
 async function readResumeText(send, name) {
   return evalExpr(send, `(() => {
     const name = ${js(name)};
@@ -617,14 +890,13 @@ async function readResumeText(send, name) {
 async function readWasmResumeDetail(send, name) {
   let fallback = null;
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    await refreshFrameTree(send);
-    const ids = resumeContextIds();
-    for (const contextId of ids) {
+    const readers = await ensureResumeReaders(send);
+    for (const reader of readers) {
       try {
         const detail = await evalExpr(
           send,
           `import(${js(RESUME_WASM_URL)}).then((mod) => mod.get_export_geek_detail_info()).catch(() => null)`,
-          { contextId }
+          { contextId: reader.contextId, sessionId: reader.sessionId }
         );
         if (detail && detail.geekBaseInfo && detail.geekBaseInfo.name === name) return detail;
         if (detail && detail.geekBaseInfo && !fallback) fallback = detail;
@@ -632,15 +904,14 @@ async function readWasmResumeDetail(send, name) {
     }
     await sleep(500);
   }
-  return fallback;
+  return fallback || await readWasmResumeDetailWithPuppeteer(name);
 }
 
 async function readCanvasText(send, name) {
   let fallback = "";
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    await refreshFrameTree(send);
-    const ids = resumeContextIds();
-    for (const contextId of ids) {
+    const readers = await ensureResumeReaders(send);
+    for (const reader of readers) {
       try {
         await evalExpr(
           send,
@@ -649,17 +920,20 @@ async function readCanvasText(send, name) {
             window.scrollTo(0, Math.min(h, ${attempt * 700}));
             return true;
           })()`,
-          { contextId }
+          { contextId: reader.contextId, sessionId: reader.sessionId }
         );
         await sleep(180);
-        const text = await evalExpr(send, `(() => (window.__bossResumeTexts || []).join(''))()`, { contextId });
+        const text = await evalExpr(send, `(() => (window.__bossResumeTexts || []).join(''))()`, {
+          contextId: reader.contextId,
+          sessionId: reader.sessionId,
+        });
         if (text && !fallback) fallback = text;
         if (text && text.includes(name)) return text;
       } catch (_) {}
     }
     await sleep(400);
   }
-  return fallback;
+  return fallback || await readCanvasTextWithPuppeteer(name);
 }
 
 function summarizeDetail(detail) {
@@ -727,7 +1001,7 @@ async function readOneCandidateKeyboard(send, row, attempt) {
     await politeDelay(`retrying ${row.name}, attempt ${attempt + 1}`, throttleCooldownMs, throttleCooldownMs + 30000);
   }
 
-  const selected = await selectRowKeyboard(send, row);
+  const selected = autoMethod === "hybrid" ? await selectRowHybrid(send, row) : await selectRowKeyboard(send, row);
   if (!selected.ok) {
     return { name: row.name, row, attempt, error: selected.reason || "keyboard row focus failed", focusProbe: selected };
   }
@@ -777,6 +1051,8 @@ async function readOneCandidateKeyboard(send, row, attempt) {
     profile,
     opened: opened.ok,
     source,
+    selectMethod: selected.selectMethod || "keyboard",
+    selectAttempts: selected.attempts,
     detail: summarizeDetail(rawDetail),
     rawDetail,
     canvasText,
@@ -974,7 +1250,7 @@ async function main() {
       if (!scrolled.moved) stagnant += 1;
       await sleep(500);
     }
-    ws.close();
+    await closeConnections(ws);
     console.error(`saved scan: ${resolvedOut}`);
     return;
   }
@@ -983,13 +1259,13 @@ async function main() {
     const result = await readCurrentOpenResume(send);
     output.results.push(result);
     fs.writeFileSync(resolvedOut, JSON.stringify(output, null, 2), "utf8");
-    ws.close();
+    await closeConnections(ws);
     console.error(`saved current open resume: ${resolvedOut}`);
     return;
   }
 
   if (!autoRead && !unsafeAutoClick) {
-    ws.close();
+    await closeConnections(ws);
     throw new Error(
       "Choose --auto-read, --scan-only, --current-open-resume, or --unsafe-auto-click."
     );
@@ -1002,7 +1278,7 @@ async function main() {
     let processed = 0;
     for (const row of rows) {
       if (limit > 0 && output.results.length >= limit) {
-        ws.close();
+        await closeConnections(ws);
         return;
       }
       if (!row.signature || seen.has(row.signature)) continue;
@@ -1046,7 +1322,7 @@ async function main() {
     await sleep(500);
   }
 
-  ws.close();
+  await closeConnections(ws);
   console.error(`saved: ${resolvedOut}`);
 }
 
