@@ -77,7 +77,7 @@ If BOSS keeps refreshing or the script says it cannot find the "online resume" b
 5. Ask the agent to rerun a small test batch first. Do not add `--stabilize` on the first retry:
 
 ```powershell
-node <installed-skill-path>\scripts\read-current-chat-online-resumes.js --position "<position name>" --limit 3 --out test_online_resumes.json
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --limit 3 --out test_online_resumes.json
 ```
 
 Only add `--stabilize` as a last-resort fallback when the page still refreshes because the browser loses focus. The default mode avoids patching BOSS page visibility/reload behavior so candidate-list rendering is less likely to break.
@@ -88,7 +88,7 @@ Do not add `--reset-to-top` by default. BOSS uses a virtual scrolling list; forc
 
 Do not downgrade to chat-summary-only reporting unless the recruiter explicitly accepts that online resumes could not be read.
 
-The reader works in single-pass mode by default: it processes each currently visible candidate row immediately, opens the online resume, writes the result, and then scrolls to the next visible batch. It does not bring the page to front or reset the list position unless explicitly requested.
+The recommended reader is `read-current-chat-online-resumes-cdp.js`. It works in single-pass mode by default: it processes each currently visible candidate row immediately, opens the online resume, writes the result, and then scrolls to the next visible batch. It does not use CDP mouse input, bring the page to front, or reset the list position.
 
 ## Typical Prompt
 
@@ -108,6 +108,7 @@ skills/boss-unread-resume-brief/
   agents/openai.yaml
   config.example.json
   scripts/
+    read-current-chat-online-resumes-cdp.js
     read-current-chat-online-resumes.js
     send-feishu-msg.js
   references/
