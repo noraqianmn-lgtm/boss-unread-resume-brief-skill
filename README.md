@@ -22,7 +22,7 @@ Each intern must use their own local BOSS and Feishu authentication.
 - Do not share BOSS cookies, browser profiles, QR-code sessions, or recruiter account sessions.
 - Do not commit or share `config.json`; only `config.example.json` belongs in GitHub.
 - Each user runs `boss login` on their own computer and logs into the BOSS recruiter account they are allowed to use.
-- Each user runs `lark-cli auth login --as user` on their own computer, producing their own Feishu token.
+- Each user runs `lark-cli config init --new` and `lark-cli auth login` on their own computer, producing their own Feishu token.
 - Each user fills their own local `config.json` with the Feishu folder, Bitable, bot, and user settings they are allowed to write to.
 - If several interns should write into the same recruiting Feishu folder or Bitable, grant them Feishu permissions to that resource; do not copy another person's token.
 
@@ -45,6 +45,8 @@ Restart Codex after installation so the new skill is discovered.
 ## Install In WorkBuddy
 
 WorkBuddy uses the local machine's session state: local skills, local browser login, local BOSS recruiter session, and local Feishu token. Install the skill on each intern's computer, then restart WorkBuddy or start a new WorkBuddy conversation so the skill list reloads.
+
+WorkBuddy can have a bundled Node.js, but this skill should use system Node.js from PATH. Do not install npm packages inside `%USERPROFILE%\.workbuddy`; that path is versioned and can have write-permission issues.
 
 Preferred WorkBuddy install prompt:
 
@@ -78,30 +80,45 @@ Use $boss-unread-resume-brief.
 WorkBuddy run notes:
 
 - Keep the BOSS browser already on the target position's unread-greetings list before asking WorkBuddy to read resumes.
-- Do not ask WorkBuddy to bring BOSS to the front, click candidates with mouse automation, or navigate to the position automatically.
-- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. It avoids CDP mouse input because BOSS can route to `/web/chat/recommend` when mouse events are sent.
+- Do not ask WorkBuddy to bring BOSS to the front, click candidates with mouse automation, dispatch DOM clicks, or navigate to the position automatically.
+- Use `read-current-chat-online-resumes-cdp.js`, the raw CDP reader. Safe modes are `--scan-only` and `--current-open-resume`; automated clicking is disabled unless `--unsafe-auto-click` is explicitly supplied for debugging.
 - If WorkBuddy reports that the skill was installed but still cannot see it, restart WorkBuddy rather than continuing in the same chat.
 
 ## First-Time Setup
 
-Install command-line dependencies:
+First check whether system Node.js is available:
 
-```powershell
-npm install -g @joohw/boss-cli
-npm install -g @larksuite/cli
+```cmd
+node --version
 ```
 
-If PowerShell blocks npm scripts, run:
+If `node` is not found, install Node.js manually:
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+1. Open `https://npmmirror.com/mirrors/node/v20.18.0/node-v20.18.0-x64.msi`
+2. Download the MSI.
+3. Double-click it and keep the default settings: Next, Next, Install, Finish.
+4. Open a new CMD window. Old terminal windows will not see the new PATH.
+
+Then install command-line dependencies:
+
+```cmd
+npm install -g @joohw/boss-cli @larksuite/cli --registry=https://registry.npmmirror.com
+```
+
+If WorkBuddy's PowerShell tool is broken or returns garbled output, do not keep debugging inside WorkBuddy. Ask the user to open external CMD and run the same commands there.
+
+The installed skill also includes an English-only Windows helper script:
+
+```cmd
+<installed-skill-path>\scripts\setup-windows.cmd
 ```
 
 Then authenticate:
 
-```powershell
+```cmd
 boss login
-lark-cli auth login --as user
+lark-cli config init --new
+lark-cli auth login
 ```
 
 These commands must be run by each intern on their own machine. Copy `config.example.json` to `config.json` inside the installed skill folder and fill in that user's Feishu folder/base/table/bot settings. Keep `config.json` local and private.
@@ -114,10 +131,10 @@ If BOSS keeps refreshing or the script says it cannot find the "online resume" b
 2. Close the BOSS browser opened by `boss login`.
 3. Run `boss login` again and finish login/risk verification.
 4. In BOSS, manually switch to the target position and the unread-greetings list.
-5. Ask the agent to rerun a small test batch first. Do not add `--stabilize` on the first retry:
+5. Ask the agent to scan a small test batch first. Do not add `--stabilize` on the first retry:
 
 ```powershell
-node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --limit 3 --out test_online_resumes.json
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --scan-only --limit 3 --out test_online_resumes.json
 ```
 
 Only add `--stabilize` as a last-resort fallback when the page still refreshes because the browser loses focus. The default mode avoids patching BOSS page visibility/reload behavior so candidate-list rendering is less likely to break.
@@ -128,7 +145,25 @@ Do not add `--reset-to-top` by default. BOSS uses a virtual scrolling list; forc
 
 Do not downgrade to chat-summary-only reporting unless the recruiter explicitly accepts that online resumes could not be read.
 
-The recommended reader is `read-current-chat-online-resumes-cdp.js`. It works in single-pass mode by default: it processes each currently visible candidate row immediately, opens the online resume, writes the result, and then scrolls to the next visible batch. It does not use CDP mouse input, bring the page to front, or reset the list position.
+The recommended reader is `read-current-chat-online-resumes-cdp.js`. Its safe modes do not use CDP mouse input, DOM `dispatchEvent`, `.click()`, bring the page to front, or reset the list position.
+
+Safe scan:
+
+```powershell
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --scan-only --out online_resumes.json
+```
+
+Safe online-resume read:
+
+1. User manually clicks a candidate in BOSS.
+2. User manually clicks that candidate's "在线简历".
+3. Agent runs:
+
+```powershell
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --current-open-resume --append --out online_resumes.json
+```
+
+Repeat the manual-open/read-current-resume loop for every candidate that must be evaluated.
 
 The reader is intentionally slow to avoid BOSS throttling. Defaults:
 
@@ -139,7 +174,7 @@ The reader is intentionally slow to avoid BOSS throttling. Defaults:
 For a safer full run, use:
 
 ```powershell
-node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --min-delay-ms 15000 --max-delay-ms 30000 --batch-pause-every 4 --batch-pause-ms 120000 --throttle-cooldown-ms 180000 --out online_resumes.json
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --current-open-resume --append --min-delay-ms 15000 --max-delay-ms 30000 --throttle-cooldown-ms 180000 --out online_resumes.json
 ```
 
 In the output JSON, `opened: true` only means the resume button was clicked. Treat a candidate as successfully read only when `source` is `"online-resume"` or `rawDetail` / `canvasText` is present. If `source` is `"panel-or-fallback"`, the content may be BOSS's candidate analyzer or a throttling page, not the full online resume.
@@ -151,7 +186,7 @@ Use $boss-unread-resume-brief.
 Position: R&D Director La Forge
 Only read unread greetings. I have already opened BOSS recruiting chat on this position's unread list.
 Here are the rough job requirements: ...
-Please first help me clarify A/B/C screening criteria, then read online resumes and generate a Feishu daily brief. Do not take any BOSS disposition actions.
+Please first help me clarify A/B/C screening criteria, then scan the unread list. For online resumes, ask me to manually open each candidate's online resume and read only the currently open resume. Generate a Feishu daily brief. Do not take any BOSS disposition actions.
 ```
 
 ## Repository Layout
@@ -164,6 +199,7 @@ skills/boss-unread-resume-brief/
   scripts/
     read-current-chat-online-resumes-cdp.js
     read-current-chat-online-resumes.js
+    setup-windows.cmd
     send-feishu-msg.js
   references/
     screening-criteria.md
