@@ -16,9 +16,27 @@ const outPath = arg("out", `online_resumes_${new Date().toISOString().slice(0, 1
 const limit = Number(arg("limit", "0"));
 const scanOnly = process.argv.includes("--scan-only");
 const onlyUnread = process.argv.includes("--only-unread");
+const minDelayMs = Number(arg("min-delay-ms", "10000"));
+const maxDelayMs = Number(arg("max-delay-ms", "18000"));
+const batchPauseEvery = Number(arg("batch-pause-every", "5"));
+const batchPauseMs = Number(arg("batch-pause-ms", "90000"));
+const throttleCooldownMs = Number(arg("throttle-cooldown-ms", "90000"));
+const maxRetries = Number(arg("max-retries", "1"));
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function jitter(min, max) {
+  const lo = Math.max(0, Math.min(min, max));
+  const hi = Math.max(lo, max);
+  return Math.floor(lo + Math.random() * (hi - lo + 1));
+}
+
+async function politeDelay(reason, min = minDelayMs, max = maxDelayMs) {
+  const delay = jitter(min, max);
+  console.error(`${reason}; waiting ${Math.round(delay / 1000)}s`);
+  await sleep(delay);
 }
 
 function js(value) {
@@ -98,6 +116,27 @@ async function getPageState(send) {
     title: document.title,
     text: document.body.innerText.slice(0, 800)
   }))()`);
+}
+
+async function getThrottleState(send) {
+  return evalExpr(send, `(() => {
+    const normalize = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+    const text = normalize(document.body.innerText || '');
+    const patterns = [
+      '操作过于频繁',
+      '操作频繁',
+      '访问过于频繁',
+      '请求过于频繁',
+      '请稍后再试',
+      '稍后再试',
+      '安全验证',
+      '风险验证',
+      '验证',
+      '加载中'
+    ];
+    const matched = patterns.filter((item) => text.includes(item));
+    return { throttled: matched.length > 0, matched, text: text.slice(0, 1200) };
+  })()`);
 }
 
 async function getVisibleRows(send) {
@@ -231,6 +270,13 @@ async function readResumeText(send, name) {
   })()`);
 }
 
+function isResumeReadWeak(result) {
+  if (!result.opened) return true;
+  const text = String(result.resumeText || "");
+  if (text.length < 80) return true;
+  return /操作过于频繁|操作频繁|访问过于频繁|请求过于频繁|稍后再试|安全验证|风险验证|加载中/.test(text);
+}
+
 async function closeModal(send) {
   await evalExpr(send, `(() => {
     const close = [...document.querySelectorAll('i,span,button,div')]
@@ -259,6 +305,54 @@ async function scrollList(send) {
     list.scrollTop += Math.max(480, Math.floor((list.clientHeight || 700) * 0.75));
     return { moved: list.scrollTop !== before, top: list.scrollTop, height: list.scrollHeight, client: list.clientHeight };
   })()`);
+}
+
+async function readOneCandidate(send, row, attempt) {
+  if (attempt > 0) {
+    await politeDelay(`retrying ${row.name}, attempt ${attempt + 1}`, throttleCooldownMs, throttleCooldownMs + 30000);
+  }
+
+  const clicked = await dispatchRowClick(send, row);
+  if (!clicked.ok) {
+    return { name: row.name, row, attempt, error: clicked.reason || "DOM row click failed" };
+  }
+  await sleep(1200);
+
+  const panel = await waitForPanel(send, row.name);
+  const profile = panel.text || "";
+  const beforeOpenThrottle = await getThrottleState(send);
+  if (beforeOpenThrottle.throttled) {
+    return {
+      name: row.name,
+      row,
+      attempt,
+      clickedText: clicked.text,
+      panelReady: panel.ready,
+      profile,
+      throttle: beforeOpenThrottle,
+      error: "possible BOSS throttling before opening online resume",
+    };
+  }
+
+  const opened = await openOnlineResume(send);
+  await sleep(opened.ok ? 3500 : 800);
+  const afterOpenThrottle = await getThrottleState(send);
+  const resumeText = opened.ok ? await readResumeText(send, row.name) : "";
+
+  return {
+    name: row.name,
+    row,
+    attempt,
+    clickedText: clicked.text,
+    panelReady: panel.ready,
+    profile,
+    opened: opened.ok,
+    resumeText,
+    modalText: resumeText,
+    throttle: afterOpenThrottle.throttled ? afterOpenThrottle : undefined,
+    resumeButtonProbe: opened.ok ? undefined : opened,
+    error: opened.ok ? undefined : opened.reason,
+  };
 }
 
 async function main() {
@@ -299,35 +393,27 @@ async function main() {
       output.rows.push(row);
       console.error(`reading visible row: ${row.name}`);
 
-      const clicked = await dispatchRowClick(send, row);
-      if (!clicked.ok) {
-        output.results.push({ name: row.name, row, error: clicked.reason || "DOM row click failed" });
-        fs.writeFileSync(path.resolve(outPath), JSON.stringify(output, null, 2), "utf8");
-        continue;
+      let result = null;
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        result = await readOneCandidate(send, row, attempt);
+        const weak = isResumeReadWeak(result);
+        const throttled = Boolean(result.throttle && result.throttle.throttled);
+        if (!weak && !throttled) break;
+        if (attempt >= maxRetries) break;
+        console.error(`weak/throttled read for ${row.name}: ${result.error || "resume text too short"}`);
+        await closeModal(send);
       }
-      await sleep(900);
-      const panel = await waitForPanel(send, row.name);
-      const profile = panel.text || "";
-      const opened = await openOnlineResume(send);
-      await sleep(opened.ok ? 2200 : 500);
-      const resumeText = opened.ok ? await readResumeText(send, row.name) : "";
 
-      output.results.push({
-        name: row.name,
-        row,
-        clickedText: clicked.text,
-        panelReady: panel.ready,
-        profile,
-        opened: opened.ok,
-        resumeText,
-        modalText: resumeText,
-        resumeButtonProbe: opened.ok ? undefined : opened,
-        error: opened.ok ? undefined : opened.reason,
-      });
+      output.results.push(result);
       fs.writeFileSync(path.resolve(outPath), JSON.stringify(output, null, 2), "utf8");
-      if (opened.ok) await closeModal(send);
-      await sleep(500);
+      if (result && result.opened) await closeModal(send);
       processed += 1;
+
+      if (batchPauseEvery > 0 && output.results.length % batchPauseEvery === 0) {
+        await politeDelay(`batch pause after ${output.results.length} candidates`, batchPauseMs, batchPauseMs + 30000);
+      } else {
+        await politeDelay(`candidate ${row.name} finished`);
+      }
     }
     if (processed > 0) stagnant = 0;
     else stagnant += 1;
@@ -345,4 +431,3 @@ main().catch((error) => {
   console.error(error && error.stack ? error.stack : String(error));
   process.exit(1);
 });
-
