@@ -26,7 +26,7 @@ const appendOutput = process.argv.includes("--append");
 const onlyUnread = process.argv.includes("--only-unread");
 const sinceDate = arg("since-date", "");
 const includeUnknownDate = process.argv.includes("--include-unknown-date");
-const autoMethod = arg("auto-method", "keyboard");
+const autoMethod = arg("auto-method", "hybrid");
 const minDelayMs = Number(arg("min-delay-ms", "10000"));
 const maxDelayMs = Number(arg("max-delay-ms", "18000"));
 const batchPauseEvery = Number(arg("batch-pause-every", "5"));
@@ -198,6 +198,21 @@ function resumeContextIds() {
     if (url.includes("/web/frame/c-resume/")) ids.push(context.id);
   }
   return ids;
+}
+
+async function waitForResumeFrame(send, timeoutMs = 5000) {
+  const start = Date.now();
+  let last = [];
+  while (Date.now() - start < timeoutMs) {
+    await refreshFrameTree(send);
+    const ids = resumeContextIds();
+    last = [...framesById.values()]
+      .map((frame) => frame.url || "")
+      .filter((url) => url.includes("/web/frame/c-resume/"));
+    if (ids.length > 0 || last.length > 0) return { ok: true, contextIds: ids, urls: last };
+    await sleep(300);
+  }
+  return { ok: false, contextIds: [], urls: last };
 }
 
 async function getPageState(send) {
@@ -432,30 +447,46 @@ async function waitForPanel(send, name) {
   return { ready: false, text: "", reason: "candidate detail panel did not load" };
 }
 
-async function focusOnlineResumeButton(send) {
-  return evalExpr(send, `(() => {
-    const candidates = [...document.querySelectorAll('a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]')]
-      .map((el) => {
-        const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, '');
-        const cls = String(el.className || '');
-        const title = String(el.getAttribute('title') || '');
-        const aria = String(el.getAttribute('aria-label') || '');
-        const href = String(el.getAttribute('href') || '');
-        const r = el.getBoundingClientRect();
-        const visible = r.width > 12 && r.height > 12 && r.bottom > 0 && r.right > 0;
-        const haystack = (text + ' ' + cls + ' ' + title + ' ' + aria + ' ' + href).toLowerCase();
-        let score = 0;
-        if (text.includes('在线简历') || title.includes('在线简历') || aria.includes('在线简历')) score += 100;
-        if (text.includes('查看简历') || title.includes('查看简历') || aria.includes('查看简历')) score += 80;
-        if (cls.includes('resume-btn-online')) score += 90;
-        if (haystack.includes('online') && haystack.includes('resume')) score += 70;
-        if (haystack.includes('resume')) score += 30;
-        if (text.includes('简历') || title.includes('简历') || aria.includes('简历')) score += 25;
-        if (text.includes('附件简历') || title.includes('附件简历') || aria.includes('附件简历')) score -= 15;
-        return { el, visible, score, text: text.slice(0, 80), cls: cls.slice(0, 120), title, aria, href };
-      })
+function resumeButtonProbeSource() {
+  return `
+    const collectAttrs = (el) => {
+      const attrs = {};
+      for (const attr of el.attributes || []) attrs[attr.name] = attr.value;
+      return attrs;
+    };
+    const scoreResumeButton = (el) => {
+      const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, '');
+      const cls = String(el.className || '');
+      const title = String(el.getAttribute('title') || '');
+      const aria = String(el.getAttribute('aria-label') || '');
+      const href = String(el.getAttribute('href') || '');
+      const dataset = Object.values(el.dataset || {}).join(' ');
+      const attrs = Object.values(collectAttrs(el)).join(' ');
+      const r = el.getBoundingClientRect();
+      const visible = r.width > 12 && r.height > 12 && r.bottom > 0 && r.right > 0;
+      const haystack = (text + ' ' + cls + ' ' + title + ' ' + aria + ' ' + href + ' ' + dataset + ' ' + attrs).toLowerCase();
+      let score = 0;
+      if (text.includes('在线简历') || title.includes('在线简历') || aria.includes('在线简历')) score += 100;
+      if (text.includes('查看简历') || title.includes('查看简历') || aria.includes('查看简历')) score += 80;
+      if (cls.includes('resume-btn-online')) score += 90;
+      if (haystack.includes('c-resume')) score += 90;
+      if (haystack.includes('online') && haystack.includes('resume')) score += 70;
+      if (haystack.includes('resume')) score += 30;
+      if (text.includes('简历') || title.includes('简历') || aria.includes('简历')) score += 25;
+      if (text.includes('附件简历') || title.includes('附件简历') || aria.includes('附件简历')) score -= 15;
+      return { el, visible, score, text: text.slice(0, 80), cls: cls.slice(0, 120), title, aria, href, attrs: collectAttrs(el) };
+    };
+    const findResumeButtons = () => [...document.querySelectorAll('a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]')]
+      .map(scoreResumeButton)
       .filter((item) => item.visible && item.score > 0)
       .sort((a, b) => b.score - a.score);
+  `;
+}
+
+async function focusOnlineResumeButton(send) {
+  return evalExpr(send, `(() => {
+    ${resumeButtonProbeSource()}
+    const candidates = findResumeButtons();
     const best = candidates[0];
     if (!best) return { ok: false, reason: 'online resume button not found', candidates: candidates.slice(0, 20).map(({el, ...rest}) => rest) };
     best.el.scrollIntoView({ block: 'center' });
@@ -463,7 +494,7 @@ async function focusOnlineResumeButton(send) {
     best.el.focus({ preventScroll: true });
     return {
       ok: document.activeElement === best.el || best.el.contains(document.activeElement),
-      button: { score: best.score, text: best.text, cls: best.cls, title: best.title, aria: best.aria, href: best.href }
+      button: { score: best.score, text: best.text, cls: best.cls, title: best.title, aria: best.aria, href: best.href, attrs: best.attrs }
     };
   })()`);
 }
@@ -472,43 +503,23 @@ async function openOnlineResumeKeyboard(send) {
   const focused = await focusOnlineResumeButton(send);
   if (!focused.ok) return focused;
   await pressKey(send, "Enter");
-  await sleep(1200);
-  await refreshFrameTree(send);
-  if (resumeContextIds().length > 0) return { ok: true, method: "keyboard-enter", button: focused.button };
+  const enterFrame = await waitForResumeFrame(send, 2500);
+  if (enterFrame.ok) return { ok: true, method: "keyboard-enter", button: focused.button, frame: enterFrame };
   await pressKey(send, "Space");
-  await sleep(1200);
-  await refreshFrameTree(send);
+  const spaceFrame = await waitForResumeFrame(send, 2500);
   return {
-    ok: resumeContextIds().length > 0,
+    ok: spaceFrame.ok,
     method: "keyboard-enter-space",
     button: focused.button,
-    reason: resumeContextIds().length > 0 ? undefined : "online resume iframe did not appear after keyboard activation",
+    frame: spaceFrame,
+    reason: spaceFrame.ok ? undefined : "online resume iframe did not appear after keyboard activation",
   };
 }
 
 async function openOnlineResume(send) {
   return evalExpr(send, `(() => {
-    const candidates = [...document.querySelectorAll('a,button,span,div,[role="button"],[class*="resume"],[class*="Resume"]')]
-      .map((el) => {
-        const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, '');
-        const cls = String(el.className || '');
-        const title = String(el.getAttribute('title') || '');
-        const aria = String(el.getAttribute('aria-label') || '');
-        const r = el.getBoundingClientRect();
-        const visible = r.width > 12 && r.height > 12 && r.bottom > 0 && r.right > 0;
-        const haystack = (text + ' ' + cls + ' ' + title + ' ' + aria).toLowerCase();
-        let score = 0;
-        if (text.includes('在线简历') || title.includes('在线简历') || aria.includes('在线简历')) score += 100;
-        if (text.includes('查看简历') || title.includes('查看简历') || aria.includes('查看简历')) score += 80;
-        if (cls.includes('resume-btn-online')) score += 90;
-        if (haystack.includes('online') && haystack.includes('resume')) score += 70;
-        if (haystack.includes('resume')) score += 30;
-        if (text.includes('简历') || title.includes('简历') || aria.includes('简历')) score += 25;
-        if (text.includes('附件简历') || title.includes('附件简历') || aria.includes('附件简历')) score -= 15;
-        return { el, visible, score, text: text.slice(0, 80), cls: cls.slice(0, 120), title, aria };
-      })
-      .filter((item) => item.visible && item.score > 0)
-      .sort((a, b) => b.score - a.score);
+    ${resumeButtonProbeSource()}
+    const candidates = findResumeButtons();
     const best = candidates[0];
     if (!best) return { ok: false, reason: 'online resume button not found', candidates: candidates.slice(0, 20).map(({el, ...rest}) => rest) };
     best.el.scrollIntoView({ block: 'center' });
@@ -516,8 +527,75 @@ async function openOnlineResume(send) {
       best.el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
     }
     if (typeof best.el.click === 'function') best.el.click();
-    return { ok: true, button: { score: best.score, text: best.text, cls: best.cls, title: best.title, aria: best.aria } };
+    return { ok: true, method: 'dom-events-click', button: { score: best.score, text: best.text, cls: best.cls, title: best.title, aria: best.aria, href: best.href, attrs: best.attrs } };
   })()`);
+}
+
+async function openOnlineResumeFromDiscoveredUrl(send) {
+  return evalExpr(send, `(() => {
+    ${resumeButtonProbeSource()}
+    const candidates = findResumeButtons();
+    const urls = [];
+    const add = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw) return;
+      const decoded = raw.replace(/&amp;/g, '&');
+      for (const item of [raw, decoded]) {
+        if (item.includes('/web/frame/c-resume/') || item.includes('c-resume')) {
+          try { urls.push(new URL(item, location.origin).href); } catch (_) {}
+        }
+      }
+    };
+    for (const item of candidates) {
+      add(item.href);
+      for (const value of Object.values(item.attrs || {})) add(value);
+    }
+    const url = [...new Set(urls)][0];
+    if (!url) return { ok: false, reason: 'no c-resume url found in online resume button attributes', candidates: candidates.slice(0, 10).map(({el, ...rest}) => rest) };
+    let iframe = document.querySelector('iframe[data-boss-brief-resume-frame="1"]');
+    if (!iframe) {
+      iframe = document.createElement('iframe');
+      iframe.setAttribute('data-boss-brief-resume-frame', '1');
+      iframe.style.cssText = 'position:fixed;inset:24px;z-index:2147483647;width:calc(100vw - 48px);height:calc(100vh - 48px);background:#fff;border:1px solid #ddd;';
+      document.body.appendChild(iframe);
+    }
+    iframe.src = url;
+    return { ok: true, method: 'direct-c-resume-iframe', url };
+  })()`);
+}
+
+async function openOnlineResumeHybrid(send) {
+  const attempts = [];
+  const keyboard = await openOnlineResumeKeyboard(send);
+  attempts.push(keyboard);
+  if (keyboard.ok) return { ...keyboard, attempts };
+
+  const dom = await openOnlineResume(send);
+  attempts.push(dom);
+  if (dom.ok) {
+    const domFrame = await waitForResumeFrame(send, 5000);
+    if (domFrame.ok) return { ...dom, ok: true, frame: domFrame, attempts };
+    dom.frame = domFrame;
+    dom.ok = false;
+    dom.reason = dom.reason || "DOM activation did not create online resume iframe";
+  }
+
+  const direct = await openOnlineResumeFromDiscoveredUrl(send);
+  attempts.push(direct);
+  if (direct.ok) {
+    const directFrame = await waitForResumeFrame(send, 6000);
+    if (directFrame.ok) return { ...direct, ok: true, frame: directFrame, attempts };
+    direct.frame = directFrame;
+    direct.ok = false;
+    direct.reason = direct.reason || "direct c-resume iframe did not become readable";
+  }
+
+  return {
+    ok: false,
+    method: "hybrid",
+    attempts,
+    reason: attempts.map((item) => item && item.reason).filter(Boolean).join("; ") || "online resume iframe did not appear",
+  };
 }
 
 async function readResumeText(send, name) {
@@ -626,6 +704,11 @@ async function closeModal(send) {
 async function closeModalKeyboard(send) {
   await pressKey(send, "Escape").catch(() => {});
   await sleep(500);
+  await evalExpr(send, `(() => {
+    const injected = document.querySelector('iframe[data-boss-brief-resume-frame="1"]');
+    if (injected) injected.remove();
+    return true;
+  })()`).catch(() => {});
 }
 
 async function scrollList(send) {
@@ -677,7 +760,7 @@ async function readOneCandidateKeyboard(send, row, attempt) {
     };
   }
 
-  const opened = await openOnlineResumeKeyboard(send);
+  const opened = autoMethod === "hybrid" ? await openOnlineResumeHybrid(send) : await openOnlineResumeKeyboard(send);
   await sleep(opened.ok ? 3200 : 800);
   const afterOpenThrottle = await getThrottleState(send);
   const rawDetail = opened.ok ? await readWasmResumeDetail(send, row.name) : null;
@@ -702,6 +785,8 @@ async function readOneCandidateKeyboard(send, row, attempt) {
     modalText: resumeText,
     throttle: afterOpenThrottle.throttled ? afterOpenThrottle : undefined,
     resumeButtonProbe: opened.ok ? undefined : opened,
+    openMethod: opened.method,
+    openAttempts: opened.attempts,
     error: opened.ok && source === "online-resume" ? undefined : (opened.ok ? "online resume did not yield structured/canvas content" : opened.reason),
   };
 }
@@ -758,6 +843,7 @@ async function readOneCandidate(send, row, attempt) {
     modalText: resumeText,
     throttle: afterOpenThrottle.throttled ? afterOpenThrottle : undefined,
     resumeButtonProbe: opened.ok ? undefined : opened,
+    openMethod: opened.method,
     error: opened.ok && source === "online-resume" ? undefined : (opened.ok ? "online resume did not yield structured/canvas content" : opened.reason),
   };
 }
@@ -804,7 +890,7 @@ function readExistingOutput(file) {
 async function main() {
   if (showHelp) {
     console.error(`Usage:
-  Auto-read current position candidates with keyboard automation:
+  Auto-read current position candidates with hybrid online-resume opening:
     node read-current-chat-online-resumes-cdp.js --position "<position>" --out online_resumes.json
 
   Auto-read only unread greetings:
@@ -825,8 +911,8 @@ async function main() {
   }
 
   if (!scanOnly && !currentOpenResume && !unsafeAutoClick && !autoRead) autoRead = true;
-  if (autoMethod !== "keyboard" && autoMethod !== "dom") {
-    throw new Error("--auto-method must be keyboard or dom");
+  if (!["hybrid", "keyboard", "dom"].includes(autoMethod)) {
+    throw new Error("--auto-method must be hybrid, keyboard, or dom");
   }
 
   const wsUrl = await resolveWsUrl();
@@ -926,7 +1012,7 @@ async function main() {
 
       let result = null;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-        result = autoRead && autoMethod === "keyboard"
+        result = autoRead && autoMethod !== "dom"
           ? await readOneCandidateKeyboard(send, row, attempt)
           : await readOneCandidate(send, row, attempt);
         const weak = isResumeReadWeak(result);
@@ -934,14 +1020,14 @@ async function main() {
         if (!weak && !throttled) break;
         if (attempt >= maxRetries) break;
         console.error(`weak/throttled read for ${row.name}: ${result.error || "resume text too short"}`);
-        if (autoRead && autoMethod === "keyboard") await closeModalKeyboard(send);
+        if (autoRead && autoMethod !== "dom") await closeModalKeyboard(send);
         else await closeModal(send);
       }
 
       output.results.push(result);
       fs.writeFileSync(resolvedOut, JSON.stringify(output, null, 2), "utf8");
       if (result && result.opened) {
-        if (autoRead && autoMethod === "keyboard") await closeModalKeyboard(send);
+        if (autoRead && autoMethod !== "dom") await closeModalKeyboard(send);
         else await closeModal(send);
       }
       processed += 1;
