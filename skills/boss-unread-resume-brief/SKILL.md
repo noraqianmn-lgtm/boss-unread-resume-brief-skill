@@ -44,10 +44,12 @@ When the user says `boss init`, `setup`, or asks how to install:
 6. Read online resumes with:
 
 ```powershell
-node <skill-dir>\scripts\read-current-chat-online-resumes.js --position "<position>" --out online_resumes_<date>.json
+node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<position>" --out online_resumes_<date>.json
 ```
 
 Use `--browser-url http://127.0.0.1:<port>` if the default BOSS debug port is different. Use `--limit N` for a small test batch. Use `--only-unread` only if the BOSS row text exposes unread markers; otherwise rely on the user-selected unread list.
+
+Use `read-current-chat-online-resumes-cdp.js` as the default reader. Do not use Puppeteer/CDP mouse input for BOSS. Any CDP mouse event can trigger the BOSS SPA to route to `/web/chat/recommend`. The CDP reader uses only DevTools `Runtime.evaluate` and in-page DOM events, matching the successful earlier workflow.
 
 Do not add `--bring-to-front` or `--reset-to-top` by default. `--bring-to-front` can trigger BOSS to route to `/web/chat/recommend`, and `--reset-to-top` can force the virtual list into a loading state with zero rendered rows. Use the browser exactly where the user placed it: target position plus unread-greetings list.
 
@@ -68,17 +70,17 @@ Do not add `--bring-to-front` or `--reset-to-top` by default. `--bring-to-front`
 
 The BOSS online resume can be rendered through an iframe and canvas/wasm. The bundled script:
 
-- connects to the existing BOSS recruiting browser through Chrome remote debugging;
+- connects to the existing BOSS recruiting browser through Chrome remote debugging page websocket;
 - leaves BOSS native page behavior intact by default; `--stabilize` is a last-resort fallback for refresh/visibility issues;
 - reads the current candidate list in single-pass mode from the currently visible rows: process visible rows immediately, then scroll to the next visible batch;
-- does not call `page.bringToFront()` or reset the list to top unless the user explicitly passes `--bring-to-front` or `--reset-to-top`;
+- does not call `page.bringToFront()`, does not send CDP mouse input, and does not reset the list to top;
 - avoids the old two-pass "scan all rows, then find them again" pattern because BOSS uses virtual scrolling and previously scanned rows may no longer exist in the DOM;
 - opens each candidate's "在线简历";
 - captures structured resume detail where available;
 - captures canvas text where available;
 - writes incremental JSON after each candidate.
 
-If the page keeps jumping, do not keep clicking manually. Ask the user to close the browser, run `boss login`, return to the target position unread list, then rerun the script with a small `--limit 3` test. The script no longer patches BOSS page visibility/reload behavior by default. Add `--stabilize` only as a last-resort fallback if the page still refreshes because the browser loses focus.
+If the page keeps jumping, do not keep clicking manually. Ask the user to close the browser, run `boss login`, return to the target position unread list, then rerun `read-current-chat-online-resumes-cdp.js` with a small `--limit 3` test. Do not switch to Puppeteer mouse-click based scripts.
 
 If the script reports that BOSS is on `/web/chat/recommend`, stop and ask the user to manually switch back to the target position's unread chat list. Do not try to navigate the SPA automatically.
 
