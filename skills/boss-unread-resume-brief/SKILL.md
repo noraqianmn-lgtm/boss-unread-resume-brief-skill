@@ -53,6 +53,17 @@ Use `read-current-chat-online-resumes-cdp.js` as the default reader. Do not use 
 
 Do not add `--bring-to-front` or `--reset-to-top` by default. `--bring-to-front` can trigger BOSS to route to `/web/chat/recommend`, and `--reset-to-top` can force the virtual list into a loading state with zero rendered rows. Use the browser exactly where the user placed it: target position plus unread-greetings list.
 
+Throttle online-resume reads. The CDP reader defaults to:
+- `--min-delay-ms 10000 --max-delay-ms 18000` between candidates;
+- `--batch-pause-every 5 --batch-pause-ms 90000` for longer pauses;
+- `--throttle-cooldown-ms 90000 --max-retries 1` when BOSS appears to throttle or returns a weak/empty resume.
+
+If online resumes are frequently unread because BOSS throttles, rerun more slowly, for example:
+
+```powershell
+node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<position>" --min-delay-ms 15000 --max-delay-ms 30000 --batch-pause-every 4 --batch-pause-ms 120000 --throttle-cooldown-ms 180000 --out online_resumes_<date>.json
+```
+
 7. Inspect the JSON. If any record has `error`, retry once. If it still fails, include it in the report as "online resume not read; needs manual check".
 8. Evaluate candidates using the confirmed criteria. Base judgments primarily on `detail`, `canvasText`, and `headerText` from the online resume output.
 9. Generate a Markdown report:
@@ -76,6 +87,7 @@ The BOSS online resume can be rendered through an iframe and canvas/wasm. The bu
 - does not call `page.bringToFront()`, does not send CDP mouse input, and does not reset the list to top;
 - avoids the old two-pass "scan all rows, then find them again" pattern because BOSS uses virtual scrolling and previously scanned rows may no longer exist in the DOM;
 - opens each candidate's "在线简历";
+- slows down by default to avoid online-resume throttling and records throttle signals in JSON;
 - captures structured resume detail where available;
 - captures canvas text where available;
 - writes incremental JSON after each candidate.
