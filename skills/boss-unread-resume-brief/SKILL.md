@@ -64,6 +64,8 @@ If online resumes are frequently unread because BOSS throttles, rerun more slowl
 node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<position>" --min-delay-ms 15000 --max-delay-ms 30000 --batch-pause-every 4 --batch-pause-ms 120000 --throttle-cooldown-ms 180000 --out online_resumes_<date>.json
 ```
 
+When interpreting output JSON, do not treat `opened: true` as success by itself. Count the online resume as read only when `source` is `"online-resume"` or `rawDetail` / `canvasText` is present. If `source` is `"panel-or-fallback"`, the text may come from BOSS's candidate analyzer or a throttling/intercept page.
+
 7. Inspect the JSON. If any record has `error`, retry once. If it still fails, include it in the report as "online resume not read; needs manual check".
 8. Evaluate candidates using the confirmed criteria. Base judgments primarily on `detail`, `canvasText`, and `headerText` from the online resume output.
 9. Generate a Markdown report:
@@ -88,6 +90,7 @@ The BOSS online resume can be rendered through an iframe and canvas/wasm. The bu
 - avoids the old two-pass "scan all rows, then find them again" pattern because BOSS uses virtual scrolling and previously scanned rows may no longer exist in the DOM;
 - opens each candidate's "在线简历";
 - slows down by default to avoid online-resume throttling and records throttle signals in JSON;
+- marks analyzer/intercept-only content as weak fallback instead of a successful online-resume read;
 - captures structured resume detail where available;
 - captures canvas text where available;
 - writes incremental JSON after each candidate.
