@@ -17,7 +17,11 @@ const wsUrlArg = arg("ws", "");
 const position = arg("position", "");
 const outPath = arg("out", `online_resumes_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.json`);
 const limit = Number(arg("limit", "0"));
+const showHelp = process.argv.includes("--help") || process.argv.includes("-h");
 const scanOnly = process.argv.includes("--scan-only");
+const currentOpenResume = process.argv.includes("--current-open-resume");
+const unsafeAutoClick = process.argv.includes("--unsafe-auto-click");
+const appendOutput = process.argv.includes("--append");
 const onlyUnread = process.argv.includes("--only-unread");
 const minDelayMs = Number(arg("min-delay-ms", "10000"));
 const maxDelayMs = Number(arg("max-delay-ms", "18000"));
@@ -235,6 +239,27 @@ async function getVisibleRows(send) {
       .filter((row) => row.rect.width > 30 && row.rect.height > 20)
       .filter((row) => !position || row.text.includes(position))
       .filter((row) => !onlyUnread || row.unreadHint);
+  })()`);
+}
+
+async function getCurrentCandidateName(send) {
+  return evalExpr(send, `(() => {
+    const normalize = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+    const selectors = [
+      '.geek-item.active .geek-name',
+      '.geek-item-wrap.active .geek-name',
+      '.geek-item.selected .geek-name',
+      '.geek-item-wrap.selected .geek-name',
+      '.chat-info .geek-name',
+      '.boss-chat-card .geek-name',
+      '.geek-name'
+    ];
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      const text = normalize(el && el.innerText);
+      if (text) return text;
+    }
+    return '';
   })()`);
 }
 
@@ -516,7 +541,65 @@ async function readOneCandidate(send, row, attempt) {
   };
 }
 
+async function readCurrentOpenResume(send) {
+  await refreshFrameTree(send);
+  const rawDetail = await readWasmResumeDetail(send, "");
+  const detailName = rawDetail && rawDetail.geekBaseInfo && rawDetail.geekBaseInfo.name;
+  const domName = await getCurrentCandidateName(send);
+  const name = detailName || domName || "current-open-resume";
+  const canvasText = await readCanvasText(send, name === "current-open-resume" ? "" : name);
+  const headerText = await readResumeText(send, name === "current-open-resume" ? "" : name);
+  const throttle = await getThrottleState(send);
+  const source = rawDetail || canvasText ? "online-resume" : "panel-or-fallback";
+  return {
+    name,
+    row: null,
+    attempt: 0,
+    clickedText: "",
+    panelReady: Boolean(headerText || rawDetail || canvasText),
+    profile: headerText,
+    opened: Boolean(rawDetail || canvasText || headerText),
+    source,
+    detail: summarizeDetail(rawDetail),
+    rawDetail,
+    canvasText,
+    headerText,
+    resumeText: headerText,
+    modalText: headerText,
+    throttle: throttle.throttled ? throttle : undefined,
+    error: source === "online-resume" ? undefined : "current open resume did not yield structured/canvas content",
+  };
+}
+
+function readExistingOutput(file) {
+  if (!appendOutput || !fs.existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (parsed && Array.isArray(parsed.rows) && Array.isArray(parsed.results)) return parsed;
+  } catch (_) {}
+  return null;
+}
+
 async function main() {
+  if (showHelp) {
+    console.error(`Usage:
+  Safe list scan:
+    node read-current-chat-online-resumes-cdp.js --position "<position>" --scan-only --out online_resumes.json
+
+  Safe online-resume read after the user manually opens "在线简历":
+    node read-current-chat-online-resumes-cdp.js --current-open-resume --append --out online_resumes.json
+
+  Legacy debug only, may trigger BOSS refresh:
+    node read-current-chat-online-resumes-cdp.js --unsafe-auto-click --limit 3 --out unsafe_test.json`);
+    return;
+  }
+
+  if (!scanOnly && !currentOpenResume && !unsafeAutoClick) {
+    throw new Error(
+      "Choose a mode before connecting to BOSS: --scan-only, --current-open-resume, or --unsafe-auto-click. Safe WorkBuddy usage should use --scan-only first, then --current-open-resume --append after the user manually opens an online resume."
+    );
+  }
+
   const wsUrl = await resolveWsUrl();
   const { ws, send } = await connect(wsUrl);
   await enablePageIntrospection(send);
@@ -526,19 +609,69 @@ async function main() {
   }
   console.error(`connected: ${state.url}`);
 
-  const output = {
+  const resolvedOut = path.resolve(outPath);
+  const output = readExistingOutput(resolvedOut) || {
     meta: {
       createdAt: new Date().toISOString(),
       position,
       browserUrl,
       pageUrl: state.url,
-      mode: "raw-cdp-runtime-evaluate-no-input-events",
+      mode: currentOpenResume
+        ? "current-open-resume-no-clicks"
+        : scanOnly
+          ? "scan-only-no-clicks"
+          : unsafeAutoClick
+            ? "unsafe-auto-click-legacy"
+            : "blocked-no-clicks",
       bossSideActionsPerformed: 0,
     },
     rows: [],
     results: [],
   };
-  fs.writeFileSync(path.resolve(outPath), JSON.stringify(output, null, 2), "utf8");
+  fs.writeFileSync(resolvedOut, JSON.stringify(output, null, 2), "utf8");
+
+  if (scanOnly) {
+    const seenRows = new Set(output.rows.map((row) => row.signature).filter(Boolean));
+    let stagnant = 0;
+    for (let step = 0; step < 80 && stagnant < 8; step += 1) {
+      const rows = (await getVisibleRows(send)) || [];
+      let added = 0;
+      for (const row of rows) {
+        if (!row.signature || seenRows.has(row.signature)) continue;
+        seenRows.add(row.signature);
+        output.rows.push(row);
+        added += 1;
+        if (limit > 0 && output.rows.length >= limit) break;
+      }
+      fs.writeFileSync(resolvedOut, JSON.stringify(output, null, 2), "utf8");
+      console.error(`scan step ${step}: visible ${rows.length}, added ${added}, total ${output.rows.length}`);
+      if (limit > 0 && output.rows.length >= limit) break;
+      if (added > 0) stagnant = 0;
+      else stagnant += 1;
+      const scrolled = await scrollList(send);
+      if (!scrolled.moved) stagnant += 1;
+      await sleep(500);
+    }
+    ws.close();
+    console.error(`saved scan: ${resolvedOut}`);
+    return;
+  }
+
+  if (currentOpenResume) {
+    const result = await readCurrentOpenResume(send);
+    output.results.push(result);
+    fs.writeFileSync(resolvedOut, JSON.stringify(output, null, 2), "utf8");
+    ws.close();
+    console.error(`saved current open resume: ${resolvedOut}`);
+    return;
+  }
+
+  if (!unsafeAutoClick) {
+    ws.close();
+    throw new Error(
+      "Automated BOSS candidate/resume clicking is disabled because synthetic clicks can trigger /web/chat/recommend refresh. Use --scan-only, or ask the user to manually open a candidate's online resume and run --current-open-resume --append. Use --unsafe-auto-click only for deliberate legacy debugging."
+    );
+  }
 
   const seen = new Set();
   let stagnant = 0;
@@ -567,7 +700,7 @@ async function main() {
       }
 
       output.results.push(result);
-      fs.writeFileSync(path.resolve(outPath), JSON.stringify(output, null, 2), "utf8");
+      fs.writeFileSync(resolvedOut, JSON.stringify(output, null, 2), "utf8");
       if (result && result.opened) await closeModal(send);
       processed += 1;
 
@@ -586,7 +719,7 @@ async function main() {
   }
 
   ws.close();
-  console.error(`saved: ${path.resolve(outPath)}`);
+  console.error(`saved: ${resolvedOut}`);
 }
 
 main().catch((error) => {
