@@ -4,6 +4,9 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
+const RESUME_WASM_URL =
+  "https://static.zhipin.com/assets/zhipin/wasm/resume/wasm_canvas-1.0.2-5081.js";
+
 function arg(name, fallback) {
   const idx = process.argv.indexOf(`--${name}`);
   return idx >= 0 ? process.argv[idx + 1] : fallback;
@@ -22,6 +25,8 @@ const batchPauseEvery = Number(arg("batch-pause-every", "5"));
 const batchPauseMs = Number(arg("batch-pause-ms", "90000"));
 const throttleCooldownMs = Number(arg("throttle-cooldown-ms", "90000"));
 const maxRetries = Number(arg("max-retries", "1"));
+const runtimeContexts = new Map();
+const framesById = new Map();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -84,7 +89,10 @@ function connect(url) {
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     const p = pending.get(msg.id);
-    if (!p) return;
+    if (!p) {
+      handleCdpEvent(msg);
+      return;
+    }
     pending.delete(msg.id);
     if (msg.error) p.reject(new Error(JSON.stringify(msg.error)));
     else p.resolve(msg);
@@ -101,13 +109,74 @@ function connect(url) {
   });
 }
 
-async function evalExpr(send, expression) {
+function handleCdpEvent(msg) {
+  if (msg.method === "Runtime.executionContextCreated") {
+    const context = msg.params && msg.params.context;
+    if (context && context.id) runtimeContexts.set(context.id, context);
+  } else if (msg.method === "Runtime.executionContextDestroyed") {
+    runtimeContexts.delete(msg.params.executionContextId);
+  } else if (msg.method === "Runtime.executionContextsCleared") {
+    runtimeContexts.clear();
+  } else if (msg.method === "Page.frameNavigated") {
+    const frame = msg.params && msg.params.frame;
+    if (frame && frame.id) framesById.set(frame.id, frame);
+  }
+}
+
+async function evalExpr(send, expression, options = {}) {
   const msg = await send("Runtime.evaluate", {
     expression,
     returnByValue: true,
     awaitPromise: true,
+    ...(options.contextId ? { contextId: options.contextId } : {}),
   });
   return msg.result.result.value;
+}
+
+async function enablePageIntrospection(send) {
+  await send("Runtime.enable").catch(() => {});
+  await send("Page.enable").catch(() => {});
+  await send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `
+      (() => {
+        window.__bossResumeTexts = window.__bossResumeTexts || [];
+        const patch = () => {
+          try {
+            const proto = CanvasRenderingContext2D.prototype;
+            if (proto.__bossBriefFillTextPatched) return;
+            proto.__bossBriefFillTextPatched = true;
+            const oldFillText = proto.fillText;
+            proto.fillText = function patchedFillText(text, ...rest) {
+              try { window.__bossResumeTexts.push(String(text)); } catch (_) {}
+              return oldFillText.call(this, text, ...rest);
+            };
+          } catch (_) {}
+        };
+        patch();
+      })();
+    `,
+  }).catch(() => {});
+}
+
+async function refreshFrameTree(send) {
+  const tree = await send("Page.getFrameTree").catch(() => null);
+  const visit = (node) => {
+    if (!node || !node.frame) return;
+    framesById.set(node.frame.id, node.frame);
+    for (const child of node.childFrames || []) visit(child);
+  };
+  if (tree && tree.result && tree.result.frameTree) visit(tree.result.frameTree);
+}
+
+function resumeContextIds() {
+  const ids = [];
+  for (const context of runtimeContexts.values()) {
+    const frameId = context.auxData && context.auxData.frameId;
+    const frame = frameId ? framesById.get(frameId) : null;
+    const url = String((frame && frame.url) || context.origin || context.name || "");
+    if (url.includes("/web/frame/c-resume/")) ids.push(context.id);
+  }
+  return ids;
 }
 
 async function getPageState(send) {
@@ -167,6 +236,29 @@ async function getVisibleRows(send) {
       .filter((row) => !position || row.text.includes(position))
       .filter((row) => !onlyUnread || row.unreadHint);
   })()`);
+}
+
+function candidateListHelperSource() {
+  return `
+    const findCandidateList = () => {
+      const rows = [...document.querySelectorAll('.geek-item-wrap,.geek-item')];
+      const firstRow = rows.find((row) => {
+        const r = row.getBoundingClientRect();
+        return r.width > 30 && r.height > 20;
+      });
+      let el = firstRow;
+      while (el && el !== document.body) {
+        const style = getComputedStyle(el);
+        const scrollable = /(auto|scroll|overlay)/.test(style.overflowY || '') || el.scrollHeight > el.clientHeight + 20;
+        if (scrollable && el.scrollHeight > el.clientHeight + 20) return el;
+        el = el.parentElement;
+      }
+      return document.querySelector('.user-list.b-scroll-stable') ||
+        document.querySelector('.user-list') ||
+        document.querySelector('[class*="user-list"]') ||
+        document.scrollingElement;
+    };
+  `;
 }
 
 async function dispatchRowClick(send, row) {
@@ -270,11 +362,71 @@ async function readResumeText(send, name) {
   })()`);
 }
 
+async function readWasmResumeDetail(send, name) {
+  let fallback = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await refreshFrameTree(send);
+    const ids = resumeContextIds();
+    for (const contextId of ids) {
+      try {
+        const detail = await evalExpr(
+          send,
+          `import(${js(RESUME_WASM_URL)}).then((mod) => mod.get_export_geek_detail_info()).catch(() => null)`,
+          { contextId }
+        );
+        if (detail && detail.geekBaseInfo && detail.geekBaseInfo.name === name) return detail;
+        if (detail && detail.geekBaseInfo && !fallback) fallback = detail;
+      } catch (_) {}
+    }
+    await sleep(500);
+  }
+  return fallback;
+}
+
+async function readCanvasText(send, name) {
+  let fallback = "";
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await refreshFrameTree(send);
+    const ids = resumeContextIds();
+    for (const contextId of ids) {
+      try {
+        await evalExpr(
+          send,
+          `(() => {
+            const h = document.body.scrollHeight || document.documentElement.scrollHeight || 4000;
+            window.scrollTo(0, Math.min(h, ${attempt * 700}));
+            return true;
+          })()`,
+          { contextId }
+        );
+        await sleep(180);
+        const text = await evalExpr(send, `(() => (window.__bossResumeTexts || []).join(''))()`, { contextId });
+        if (text && !fallback) fallback = text;
+        if (text && text.includes(name)) return text;
+      } catch (_) {}
+    }
+    await sleep(400);
+  }
+  return fallback;
+}
+
+function summarizeDetail(detail) {
+  if (!detail || typeof detail !== "object") return {};
+  return {
+    base: detail.geekBaseInfo || null,
+    work: detail.geekWorkExpList || [],
+    education: detail.geekEduExpList || [],
+    projects: detail.geekProjExpList || [],
+  };
+}
+
 function isResumeReadWeak(result) {
   if (!result.opened) return true;
+  if (result.rawDetail || result.canvasText) return false;
   const text = String(result.resumeText || "");
   if (text.length < 80) return true;
-  return /操作过于频繁|操作频繁|访问过于频繁|请求过于频繁|稍后再试|安全验证|风险验证|加载中/.test(text);
+  if (/牛人分析器|牛人分析|人才分析|沟通分析/.test(text) && !/工作经历|项目经历|教育经历|个人优势/.test(text)) return true;
+  return /操作过于频繁|操作频繁|访问过于频繁|请求过于频繁|稍后再试|安全验证|风险验证|加载中|浏览太频繁/.test(text);
 }
 
 async function closeModal(send) {
@@ -299,7 +451,8 @@ async function closeModal(send) {
 
 async function scrollList(send) {
   return evalExpr(send, `(() => {
-    const list = document.querySelector('.user-list.b-scroll-stable') || document.querySelector('.user-list') || document.scrollingElement;
+    ${candidateListHelperSource()}
+    const list = findCandidateList();
     if (!list) return { moved: false, reason: 'candidate list not found' };
     const before = list.scrollTop;
     list.scrollTop += Math.max(480, Math.floor((list.clientHeight || 700) * 0.75));
@@ -337,7 +490,10 @@ async function readOneCandidate(send, row, attempt) {
   const opened = await openOnlineResume(send);
   await sleep(opened.ok ? 3500 : 800);
   const afterOpenThrottle = await getThrottleState(send);
+  const rawDetail = opened.ok ? await readWasmResumeDetail(send, row.name) : null;
+  const canvasText = opened.ok ? await readCanvasText(send, row.name) : "";
   const resumeText = opened.ok ? await readResumeText(send, row.name) : "";
+  const source = rawDetail || canvasText ? "online-resume" : "panel-or-fallback";
 
   return {
     name: row.name,
@@ -347,17 +503,23 @@ async function readOneCandidate(send, row, attempt) {
     panelReady: panel.ready,
     profile,
     opened: opened.ok,
+    source,
+    detail: summarizeDetail(rawDetail),
+    rawDetail,
+    canvasText,
+    headerText: profile,
     resumeText,
     modalText: resumeText,
     throttle: afterOpenThrottle.throttled ? afterOpenThrottle : undefined,
     resumeButtonProbe: opened.ok ? undefined : opened,
-    error: opened.ok ? undefined : opened.reason,
+    error: opened.ok && source === "online-resume" ? undefined : (opened.ok ? "online resume did not yield structured/canvas content" : opened.reason),
   };
 }
 
 async function main() {
   const wsUrl = await resolveWsUrl();
   const { ws, send } = await connect(wsUrl);
+  await enablePageIntrospection(send);
   const state = await getPageState(send);
   if (state.url.includes("/web/chat/recommend")) {
     throw new Error("BOSS is on /web/chat/recommend. Manually switch back to the target position unread list, then rerun.");
