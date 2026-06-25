@@ -52,7 +52,7 @@ lark-cli auth login
    Read `references/screening-criteria.md` when criteria need structuring.
 4. Show the criteria back to the user and ask whether to proceed. If the user says "沿用", use the last confirmed criteria in the thread.
 5. Ask the user to open BOSS recruiting chat with their own logged-in recruiter session and choose the target position. Ask whether to read only unread greetings or all greetings after a date if the user has not specified this.
-6. Read online resumes automatically from the current position list. Default automation uses keyboard focus/Enter/Escape, not mouse events:
+6. Read online resumes automatically from the current position list. Default automation is `--auto-method hybrid`: select candidates by keyboard focus/Enter, then open "在线简历" by trying keyboard activation, the earlier successful in-page DOM activation, and direct `/web/frame/c-resume/` iframe URL discovery in that order:
 
 ```powershell
 node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<position>" --out online_resumes_<date>.json
@@ -76,7 +76,7 @@ node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<po
 
 Use `--include-unknown-date` only if the user accepts reading rows whose greeting date cannot be parsed from the visible BOSS row.
 
-Use `read-current-chat-online-resumes-cdp.js` as the default reader. Do not use Puppeteer, CDP mouse input, DOM `dispatchEvent`, or `.click()` for BOSS candidate selection by default. Any synthetic mouse click can trigger the BOSS SPA to route to `/web/chat/recommend`.
+Use `read-current-chat-online-resumes-cdp.js` as the default reader. Do not use Puppeteer or CDP mouse input. The default hybrid method keeps candidate-row selection on keyboard automation, then uses the old successful in-page DOM activation only as an online-resume button fallback. Any failed open must remain a failure unless `/web/frame/c-resume/` iframe, `rawDetail`, or `canvasText` appears.
 
 Do not add `--bring-to-front` or `--reset-to-top` by default. `--bring-to-front` can trigger BOSS to route to `/web/chat/recommend`, and `--reset-to-top` can force the virtual list into a loading state with zero rendered rows. Use the browser exactly where the user placed it: target position plus the desired candidate list.
 
@@ -86,9 +86,10 @@ Do not add `--bring-to-front` or `--reset-to-top` by default. `--bring-to-front`
 node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<position>" --scan-only --limit 10 --out scan_test.json
 ```
 
-Only use the legacy DOM-click path when the user explicitly asks for debugging and accepts the refresh risk:
+For diagnosis, force a specific open method:
 
 ```powershell
+node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<position>" --auto-method keyboard --limit 3 --out keyboard_test.json
 node <skill-dir>\scripts\read-current-chat-online-resumes-cdp.js --position "<position>" --auto-method dom --limit 3 --out dom_click_test.json
 ```
 
@@ -125,7 +126,8 @@ The BOSS online resume can be rendered through an iframe and canvas/wasm. The bu
 - connects to the existing BOSS recruiting browser through Chrome remote debugging page websocket;
 - leaves BOSS native page behavior intact by default; `--stabilize` is a last-resort fallback for refresh/visibility issues;
 - reads the current candidate list with `--scan-only` without selecting candidates;
-- automatically selects visible candidate rows and opens online resumes with keyboard focus/Enter/Escape by default;
+- automatically selects visible candidate rows with keyboard focus/Enter;
+- opens online resumes with hybrid fallback: keyboard activation, then the earlier successful in-page DOM activation, then direct `/web/frame/c-resume/` iframe URL discovery;
 - supports `--only-unread`, `--since-date YYYY-MM-DD`, and `--include-unknown-date`;
 - keeps `--current-open-resume` only as a fallback for one already-open resume;
 - does not call `page.bringToFront()`, does not send CDP mouse input, does not send DOM mouse events, and does not reset the list to top in the default mode;
@@ -140,7 +142,7 @@ If the page keeps jumping, stop automated reading. Ask the user to close the bro
 
 If the script reports that BOSS is on `/web/chat/recommend`, stop and ask the user to manually switch back to the target position's unread chat list. Do not try to navigate the SPA automatically.
 
-If rows are scanned but online resumes are not read, do not generate a chat-summary-only report. First retry with a small `--limit 3` keyboard run and slower delays. Only use `--current-open-resume --append` as a fallback for isolated candidates, and only use chat summaries as the final basis if the recruiter explicitly accepts that online resumes could not be read.
+If rows are scanned but online resumes are not read, do not generate a chat-summary-only report. First inspect `openAttempts` in the JSON, then retry a small `--limit 3` run with slower delays. Try `--auto-method keyboard` and `--auto-method dom` only as diagnostics. Only use chat summaries as the final basis if the recruiter explicitly accepts that online resumes could not be read.
 
 ## Output Contract
 
