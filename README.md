@@ -90,6 +90,18 @@ Do not downgrade to chat-summary-only reporting unless the recruiter explicitly 
 
 The recommended reader is `read-current-chat-online-resumes-cdp.js`. It works in single-pass mode by default: it processes each currently visible candidate row immediately, opens the online resume, writes the result, and then scrolls to the next visible batch. It does not use CDP mouse input, bring the page to front, or reset the list position.
 
+The reader is intentionally slow to avoid BOSS throttling. Defaults:
+
+- wait 10-18 seconds after each candidate;
+- pause 90-120 seconds after every 5 candidates;
+- if BOSS shows signs like "操作频繁", "稍后再试", "安全验证", or only returns a very short resume, cool down and retry once.
+
+For a safer full run, use:
+
+```powershell
+node <installed-skill-path>\scripts\read-current-chat-online-resumes-cdp.js --position "<position name>" --min-delay-ms 15000 --max-delay-ms 30000 --batch-pause-every 4 --batch-pause-ms 120000 --throttle-cooldown-ms 180000 --out online_resumes.json
+```
+
 ## Typical Prompt
 
 ```text
